@@ -31,7 +31,7 @@ load_dotenv()
 # --- ГЛОБАЛЬНАЯ КОНФИГУРАЦИЯ ---
 DEBUG = False
 USE_LOCAL_STR = os.getenv("USE_LOCAL", "False")
-USE_LOCAL = USE_LOCAL_STR.lower() in ('false', '1', 't')
+USE_LOCAL = USE_LOCAL_STR.lower() in ('true', '1', 't')
 USE_NVIDIA_GPU = True
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID_STR = os.getenv("ADMIN_ID")  # ID мой
