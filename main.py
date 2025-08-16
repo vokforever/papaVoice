@@ -7,6 +7,7 @@ import asyncio
 import io
 import re  # Добавляем недостающий импорт
 import json  # Добавляем импорт для работы с JSON
+import html
 from pathlib import Path
 from datetime import datetime, date  # Добавляем date для работы с месяцами
 import hashlib
@@ -1330,9 +1331,10 @@ async def process_voice_to_text(bot: Bot, voice: types.Voice, chat_id: int, mess
 
     except Exception as e:
         logger.exception(f"КРИТИЧЕСКАЯ ОШИБКА в process_voice_to_text для чата {chat_id}")
-        error_message = f"❌ Произошла критическая ошибка: `{str(e)[:250]}`"
+        error_text = html.escape(str(e)[:250])
+        error_message = f"❌ Произошла критическая ошибка: <code>{error_text}</code>"
         try:
-            await bot.send_message(chat_id, error_message)
+            await bot.send_message(chat_id, error_message, parse_mode="HTML")
         except TelegramBadRequest:
             await bot.send_message(chat_id, "❌ Произошла критическая ошибка.")
         logger.error("=== PROCESS_VOICE_TO_TEXT ЗАВЕРШЕН С ОШИБКОЙ ===")
@@ -1349,12 +1351,6 @@ async def process_text_to_voice(bot: Bot, text: str, chat_id: int, user_id: int)
     logger.info("=== НАЧАЛО PROCESS_TEXT_TO_VOICE ===")
     try:
         logger.info(f"Начинаю обработку текстового сообщения от пользователя {user_id}")
-
-        # Проверяем доступность модели TTS
-        if not check_silero_tts_availability():
-            logger.error("Модель TTS недоступна в process_text_to_voice")
-            await bot.send_message(chat_id, "❌ Модель TTS недоступна. Попробуйте команду /reload_tts")
-            return
 
         # Озвучиваем текст
         voice_data = await text_to_speech_silero(text)
@@ -1373,9 +1369,10 @@ async def process_text_to_voice(bot: Bot, text: str, chat_id: int, user_id: int)
 
     except Exception as e:
         logger.exception(f"КРИТИЧЕСКАЯ ОШИБКА в process_text_to_voice для чата {chat_id}")
-        error_message = f"❌ Произошла критическая ошибка: `{str(e)[:250]}`"
+        error_text = html.escape(str(e)[:250])
+        error_message = f"❌ Произошла критическая ошибка: <code>{error_text}</code>"
         try:
-            await bot.send_message(chat_id, error_message)
+            await bot.send_message(chat_id, error_message, parse_mode="HTML")
         except TelegramBadRequest:
             await bot.send_message(chat_id, "❌ Произошла критическая ошибка.")
         logger.error("=== PROCESS_TEXT_TO_VOICE ЗАВЕРШЕН С ОШИБКОЙ ===")
