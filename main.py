@@ -268,12 +268,18 @@ if not all([TOKEN, GROQ_API_KEY, ADMIN_ID_STR]):
     logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Не все переменные окружения загружены.")
     sys.exit("Ошибка: не найдены необходимые API ключи или ID в .env файле.")
 
+ADMIN_ID = None
 try:
-    ADMIN_ID = int(ADMIN_ID_STR)
-    logger.info(f"ADMIN_ID установлен: {ADMIN_ID}")
+    if ADMIN_ID_STR and ADMIN_ID_STR.isdigit():
+        ADMIN_ID = int(ADMIN_ID_STR)
+        logger.info(f"ADMIN_ID установлен: {ADMIN_ID}")
+    elif ADMIN_ID_STR:
+        logger.warning(f"ADMIN_ID ('{ADMIN_ID_STR}') не является числом. Запускаю без админ-функционала.")
+    else:
+        logger.warning("ADMIN_ID не найден. Запускаю без админ-функционала.")
 except ValueError:
-    logger.critical(f"Ошибка преобразования ADMIN_ID в число: {ADMIN_ID_STR}")
-    sys.exit("Ошибка: ADMIN_ID должен быть числом.")
+    logger.warning(f"Ошибка преобразования ADMIN_ID '{ADMIN_ID_STR}' в число. Запускаю без админ-функционала.")
+    ADMIN_ID = None
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 AUDIO_FOLDER.mkdir(exist_ok=True)
