@@ -75,6 +75,13 @@ else:
     USE_NVIDIA_GPU = False
     logger.info("Running in API-only mode. Skipping torch and numpy imports.")
 
+async def run_blocking(func, *args, **kwargs):
+    logger.debug(f"Выполняю блокирующую функцию: {func.__name__}")
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
+    logger.debug(f"Блокирующая функция {func.__name__} завершена")
+    return result
+
 # --- КЛАССЫ ДЛЯ УПРАВЛЕНИЯ ELEVENLABS ---
 @dataclass
 class ElevenLabsKeyUsage:
@@ -822,14 +829,6 @@ def cleanup_file(filepath):
             logger.error(f"Ошибка при удалении файла {filepath}: {e}")
     else:
         logger.debug(f"Файл для удаления не найден: {filepath}")
-
-
-async def run_blocking(func, *args, **kwargs):
-    logger.debug(f"Выполняю блокирующую функцию: {func.__name__}")
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
-    logger.debug(f"Блокирующая функция {func.__name__} завершена")
-    return result
 
 
 # --- ФУНКЦИИ УПРАВЛЕНИЯ ПАМЯТЬЮ GPU ---
