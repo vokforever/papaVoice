@@ -8,5 +8,3 @@ elevenlabs
 uvicorn==0.23.2
 websockets==11.0.3
 yandex-speech==1.14.0
-
-# Added to force a new commit
