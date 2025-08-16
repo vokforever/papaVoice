@@ -181,6 +181,9 @@ class ElevenLabsManager:
             character_count = subscription.character_count
             character_limit = subscription.character_limit
             
+            # Добавляем детальное логирование
+            logger.info(f"Ключ {key_index+1}: Проверка лимитов. Использовано: {character_count}, Лимит: {character_limit}, Осталось: {character_limit - character_count}")
+
             # Обновляем информацию о ключе
             api_key = self.api_keys[key_index]
             if api_key in self.key_usage:
@@ -198,8 +201,8 @@ class ElevenLabsManager:
             return True, f"Ключ {key_index+1}: доступно {available_chars} символов"
             
         except Exception as e:
-            logger.error(f"Ошибка проверки лимитов ключа {key_index+1}: {e}")
-            return False, f"Ошибка проверки ключа {key_index+1}: {str(e)}"
+            logger.error(f"КРИТИЧЕСКАЯ ОШИБКА проверки лимитов ключа {key_index+1}: {e}", exc_info=True)
+            return False, f"Ошибка API при проверке ключа {key_index+1}"
     
     async def get_available_key(self) -> Tuple[Optional[int], Optional[ElevenLabs], Optional[AsyncElevenLabs], str]:
         """Получить первый доступный ключ с лимитами"""
@@ -217,7 +220,7 @@ class ElevenLabsManager:
                 logger.info(f"Выбран ключ {key_index+1}: {message}")
                 return key_index, self.clients[key_index], self.async_clients[key_index], message
             
-            logger.warning(message)
+            logger.warning(f"Проверка ключа {key_index+1} не пройдена: {message}")
             attempts += 1
         
         logger.error("Все ключи ElevenLabs исчерпали лимиты")
@@ -1140,12 +1143,13 @@ class TextPreprocessor:
 
 
 # --- ФУНКЦИИ ОЗВУЧКИ ТЕКСТА ---
-async def text_to_speech_elevenlabs(text: str) -> bytes:
+async def text_to_speech_elevenlabs(text: str) -> Tuple[Optional[bytes], Optional[str]]:
     """Генерация речи через ElevenLabs API с автоматическим переключением ключей"""
     if not elevenlabs_manager:
-        return None
+        return None, "Менеджер ElevenLabs не инициализирован."
     
     max_retries = len(elevenlabs_manager.api_keys)
+    last_error = None
     
     for attempt in range(max_retries):
         try:
@@ -1154,7 +1158,7 @@ async def text_to_speech_elevenlabs(text: str) -> bytes:
             
             if key_index is None:
                 logger.error("Нет доступных ключей ElevenLabs")
-                return None
+                return None, message  # message будет "Все ключи исчерпали лимиты"
             
             logger.info(f"Использую ключ {key_index + 1} для генерации речи")
             
@@ -1189,46 +1193,48 @@ async def text_to_speech_elevenlabs(text: str) -> bytes:
                 await elevenlabs_manager.record_usage(key_index, characters_used)
                 
                 logger.info(f"Успешно сгенерировано {len(audio_bytes)} байт аудио, использовано {characters_used} символов")
-                return audio_bytes
+                return audio_bytes, None
             else:
                 logger.warning(f"Ключ {key_index + 1} вернул пустой ответ, пробую следующий")
+                last_error = "API ElevenLabs вернул пустой ответ."
                 continue
                 
         except Exception as e:
             logger.error(f"Ошибка при использовании ключа {key_index + 1}: {e}")
+            last_error = str(e)
             if attempt == max_retries - 1:
                 logger.error("Все ключи ElevenLabs недоступны")
-                return None
+                return None, f"Ошибка API ElevenLabs: {last_error}"
     
-    return None
+    return None, last_error or "Не удалось сгенерировать речь через ElevenLabs."
 
-async def text_to_speech_silero(text: str) -> bytes:
+async def text_to_speech_silero(text: str) -> Tuple[Optional[bytes], Optional[str]]:
     """Генерация речи с приоритетом ElevenLabs, затем Silero TTS"""
     
     # Сначала пробуем ElevenLabs
     if elevenlabs_client:
         logger.info("Пробую сгенерировать речь через ElevenLabs...")
-        elevenlabs_audio = await text_to_speech_elevenlabs(text)
+        elevenlabs_audio, elevenlabs_error = await text_to_speech_elevenlabs(text)
         if elevenlabs_audio:
             logger.info("Речь успешно сгенерирована через ElevenLabs")
-            return elevenlabs_audio
+            return elevenlabs_audio, None
         else:
-            logger.info("ElevenLabs недоступен, переключаюсь на Silero TTS")
+            logger.info(f"ElevenLabs недоступен (причина: {elevenlabs_error}), переключаюсь на Silero TTS")
     
     # Если ElevenLabs недоступен, используем Silero TTS только в локальном режиме
     if not USE_LOCAL:
         logger.warning("Локальный TTS отключен. Не удалось сгенерировать речь.")
-        return None
+        return None, "Сервис озвучки временно недоступен (API лимиты)."
 
     if not silero_model or not silero_device:
         logger.error("Модель Silero TTS не загружена, озвучка невозможна.")
-        return None
+        return None, "Локальная модель озвучки не загружена."
     
     text_preprocessor = TextPreprocessor()
     processed_text = text_preprocessor.preprocess(text)
     
     if not processed_text:
-        return None
+        return None, "Текст для озвучки пуст после предобработки."
     
     # Проверяем кеш
     cached_tensor = await smart_tts_cache.get(processed_text, SILERO_SPEAKER)
@@ -1249,7 +1255,7 @@ async def text_to_speech_silero(text: str) -> bytes:
                 audio_bytes = audio_file.read()
             # Удаляем временный файл
             cleanup_file(output_path)
-            return audio_bytes
+            return audio_bytes, None
         except Exception as e:
             logger.error(f"Ошибка при сохранении кешированного аудио: {e}")
     
@@ -1284,11 +1290,11 @@ async def text_to_speech_silero(text: str) -> bytes:
             # Удаляем временный файл
             cleanup_file(output_path)
             
-            return audio_bytes
+            return audio_bytes, None
     
     except Exception as e:
         logger.error(f"Ошибка при генерации речи: {e}")
-        return None
+        return None, f"Ошибка при генерации речи: {e}"
 
 
 # --- ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ ЗАДАЧ ---
@@ -1353,10 +1359,11 @@ async def process_text_to_voice(bot: Bot, text: str, chat_id: int, user_id: int)
         logger.info(f"Начинаю обработку текстового сообщения от пользователя {user_id}")
 
         # Озвучиваем текст
-        voice_data = await text_to_speech_silero(text)
+        voice_data, error_message = await text_to_speech_silero(text)
 
         if not voice_data:
-            await bot.send_message(chat_id, "❌ Не удалось создать голосовое сообщение.")
+            error_text = error_message or "Не удалось создать голосовое сообщение."
+            await bot.send_message(chat_id, f"❌ {error_text}")
             return
 
         # Отправляем голосовое сообщение
