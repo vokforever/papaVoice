@@ -12,6 +12,9 @@ from pathlib import Path
 from datetime import datetime, date  # Добавляем date для работы с месяцами
 import hashlib
 import gc
+import platform
+import subprocess
+import httpx
 from functools import partial  # Добавляем импорт partial для run_blocking
 from dataclasses import dataclass, asdict  # Добавляем dataclass для структурирования данных
 from typing import List, Dict, Optional, Tuple  # Добавляем типы для аннотаций
@@ -1022,13 +1025,13 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
                         timestamp_granularities=["word", "segment"]
                     )
                 
-                # Проверяем, что transcription - это словарь (verbose_json формат)
-                if isinstance(transcription, dict):
+                # Проверяем, что transcription - это объект с полем text (verbose_json формат)
+                if hasattr(transcription, "text"):
                     # Получаем текст из поля text
-                    text = transcription.get("text", "")
+                    text = transcription.text
                     
                     # Проверяем наличие сегментов для анализа покрытия
-                    segments = transcription.get("segments", [])
+                    segments = transcription.segments if hasattr(transcription, "segments") else []
                     if segments:
                         total_duration = 0
                         word_count = 0
@@ -1072,7 +1075,7 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
                 if attempt == max_retries:
                     logger.warning(f"Используем результат последней попытки несмотря на низкое качество")
                     logger.info("=== TRANSCRIBE_AUDIO_GROQ_WITH_RETRY ЗАВЕРШЕН С ПРЕДУПРЕЖДЕНИЕМ ===")
-                    return text if isinstance(transcription, dict) else str(transcription)
+                    return transcription.text if hasattr(transcription, "text") else str(transcription)
                 
         except Exception as e:
             logger.error(f"Ошибка в попытке {attempt + 1}: {e}")
@@ -1829,9 +1832,72 @@ async def main():
         logger.info("=== ВСЕ РЕСУРСЫ ОСВОБОЖДЕНЫ ===")
 
 
+async def check_network_connectivity(host="api.elevenlabs.io"):
+    """Проверяет сетевое подключение к хосту с помощью ping."""
+    logger.info(f"=== ПРОВЕРКА СЕТЕВОГО ПОДКЛЮЧЕНИЯ К {host} ===")
+    try:
+        # Выбираем параметр для ping в зависимости от ОС
+        param = '-n' if platform.system().lower() == 'windows' else '-c'
+        
+        # Команда для выполнения
+        command = ['ping', param, '1', host]
+        
+        # Выполняем ping
+        result = await asyncio.to_thread(subprocess.run, command, capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            logger.info(f"✅ Успешный ping к {host}:\n{result.stdout}")
+            return True, f"Хост {host} доступен."
+        else:
+            logger.error(f"❌ Ошибка ping к {host} (код {result.returncode}):\n{result.stderr}")
+            return False, f"Хост {host} недоступен с этого сервера."
+            
+    except subprocess.TimeoutExpired:
+        logger.error(f"❌ Timeout при выполнении ping к {host}. Хост не отвечает.")
+        return False, "Timeout при подключении к API."
+    except Exception as e:
+        logger.error(f"❌ Исключение при проверке сети: {e}", exc_info=True)
+        return False, f"Ошибка при проверке сети: {e}"
+
+
+async def check_elevenlabs_api_connectivity(api_key: str):
+    """Проверяет доступность API ElevenLabs, отправляя тестовый запрос."""
+    logger.info("=== ПРОВЕРКА ДОСТУПНОСТИ API ELEVENLABS ===")
+    if not api_key:
+        logger.warning("API ключ ElevenLabs не предоставлен, проверку пропущено.")
+        return
+        
+    url = "https://api.elevenlabs.io/v1/user"
+    headers = {"xi-api-key": api_key}
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                logger.info("✅ Успешное подключение к API ElevenLabs. Лимиты можно проверить.")
+            elif response.status_code == 401:
+                logger.warning("⚠️ Неверный API ключ ElevenLabs. Проверьте ключ.")
+            else:
+                logger.error(f"❌ Ошибка подключения к API ElevenLabs. Статус: {response.status_code}, Ответ: {response.text[:100]}")
+                
+    except httpx.RequestError as e:
+        logger.error("="*50)
+        logger.error("КРИТИЧЕСКАЯ СЕТЕВАЯ ОШИБКА: Не удалось подключиться к API ElevenLabs.")
+        logger.error(f"Ошибка: {e}")
+        logger.error("Это может быть вызвано блокировкой на вашем VPS/сервере.")
+        logger.error("Попробуйте выполнить команду: curl -i https://api.elevenlabs.io/v1/user")
+        logger.error("Если команда не работает, свяжитесь с поддержкой вашего хостинга.")
+        logger.error("="*50)
+
+
 if __name__ == '__main__':
     logger.info("=== ЗАПУСК ПРОГРАММЫ ===")
     
+    # Проводим сетевую диагностику перед запуском
+    if ELEVENLABS_API_KEY:
+        asyncio.run(check_elevenlabs_api_connectivity(ELEVENLABS_API_KEY))
+
     # Инициализация менеджера ElevenLabs перед запуском бота
     initialize_elevenlabs_manager()
     
