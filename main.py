@@ -54,7 +54,7 @@ ELEVENLABS_MALE_VOICE_ID = "pNInz6obpgDQGcFmaJgB"  # Adam - мужской го�
 ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"  # Модель для ElevenLabs
 ELEVENLABS_OUTPUT_FORMAT = "mp3_44100_128"
 
-# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
+# --- НАСТРОЙКА ЛОГИРОВАНИЯ  ---
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',

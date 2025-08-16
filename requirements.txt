@@ -3,5 +3,5 @@ pydub
 aiogram
 groq
 elevenlabs
-uvicorn==0.23.2
-websockets==11.0.3
+uvicorn
+websockets
