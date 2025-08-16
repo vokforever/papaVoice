@@ -1,0 +1,8 @@
+.cursor/
+.idea/
+.env
+elevenlabs_usage.json
+main — копия (2).py
+main — копия.py
+audio_files/cache/*
+!audio_files/cache/.gitkeep
