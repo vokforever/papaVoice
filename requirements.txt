@@ -1,0 +1,7 @@
+python-dotenv
+pydub
+aiogram
+groq
+torch
+numpy
+elevenlabs
