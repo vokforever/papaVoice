@@ -7,7 +7,6 @@ import asyncio
 import io
 import re  # Добавляем недостающий импорт
 import json  # Добавляем импорт для работы с JSON
-import numpy as np  # Добавляем импорт numpy для нормализации аудио
 from pathlib import Path
 from datetime import datetime, date  # Добавляем date для работы с месяцами
 import hashlib
@@ -22,7 +21,6 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from groq import Groq, APIError
-import torch
 # Добавляем импорт ElevenLabs
 from elevenlabs import ElevenLabs
 from elevenlabs.client import AsyncElevenLabs
@@ -32,6 +30,8 @@ load_dotenv()
 
 # --- ГЛОБАЛЬНАЯ КОНФИГУРАЦИЯ ---
 DEBUG = False
+USE_LOCAL_STR = os.getenv("USE_LOCAL", "False")
+USE_LOCAL = USE_LOCAL_STR.lower() in ('false', '1', 't')
 USE_NVIDIA_GPU = True
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID_STR = os.getenv("ADMIN_ID")  # ID мой
@@ -60,6 +60,20 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+# --- УСЛОВНЫЕ ИМПОРТЫ ДЛЯ ЛОКАЛЬНОГО РЕЖИМА ---
+if USE_LOCAL:
+    try:
+        import torch
+        import numpy as np
+        logger.info("Running in local mode. Torch and numpy imported.")
+    except ImportError:
+        logger.error("torch and numpy are required for local mode. Please install them.")
+        sys.exit("torch and numpy are required for local mode. Please install them.")
+else:
+    # Отключаем GPU, если не используем локальные зависимости
+    USE_NVIDIA_GPU = False
+    logger.info("Running in API-only mode. Skipping torch and numpy imports.")
 
 # --- КЛАССЫ ДЛЯ УПРАВЛЕНИЯ ELEVENLABS ---
 @dataclass
@@ -317,59 +331,61 @@ def initialize_elevenlabs_manager():
 elevenlabs_available = initialize_elevenlabs_manager()
 
 # --- ОПТИМИЗАЦИИ PYTORCH ---
-logger.info("=== ДИАГНОСТИКА PYTORCH ===")
-logger.info(f"Версия PyTorch: {torch.__version__}")
-logger.info(f"Версия CUDA: {torch.version.cuda}")
-logger.info(f"Версия cuDNN: {torch.backends.cudnn.version()}")
-logger.info(f"USE_NVIDIA_GPU: {USE_NVIDIA_GPU}")
-
-# Дополнительная диагностика PyTorch
-logger.info(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
-logger.info(f"torch.cuda.device_count(): {torch.cuda.device_count() if torch.cuda.is_available() else 'N/A'}")
-logger.info(f"torch.backends.cudnn.enabled: {torch.backends.cudnn.enabled}")
-logger.info(f"torch.backends.cudnn.benchmark: {torch.backends.cudnn.benchmark}")
-logger.info(f"torch.backends.cudnn.deterministic: {torch.backends.cudnn.deterministic}")
-
-if USE_NVIDIA_GPU and torch.cuda.is_available():
-    torch.set_grad_enabled(False)
-    torch.backends.cudnn.benchmark = True
-    if torch.cuda.get_device_capability()[0] >= 8:
-        logger.info("GPU Ampere+ обнаружен. Включаю поддержку TF32 для ускорения.")
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
-    logger.info("Глобальные оптимизации PyTorch для инференса применены.")
-    
-    # Дополнительная диагностика CUDA
-    logger.info(f"CUDA_HOME: {os.environ.get('CUDA_HOME', 'Не установлен')}")
-    logger.info(f"CUDA_PATH: {os.environ.get('CUDA_PATH', 'Не установлен')}")
-    logger.info(f"LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'Не установлен')}")
-else:
-    logger.warning("CUDA недоступна или отключена. Оптимизации GPU не применены.")
-    
-    # Диагностика причин недоступности CUDA
-    logger.info("=== ДИАГНОСТИКА CUDA ===")
-    logger.info(f"torch.version.cuda: {torch.version.cuda}")
-    logger.info(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+if USE_LOCAL:
+    logger.info("=== ДИАГНОСТИКА PYTORCH ===")
+    logger.info(f"Версия PyTorch: {torch.__version__}")
+    logger.info(f"Версия CUDA: {torch.version.cuda}")
+    logger.info(f"Версия cuDNN: {torch.backends.cudnn.version()}")
     logger.info(f"USE_NVIDIA_GPU: {USE_NVIDIA_GPU}")
-    
-    # Проверяем переменные окружения
-    cuda_home = os.environ.get('CUDA_HOME')
-    cuda_path = os.environ.get('CUDA_PATH')
-    logger.info(f"CUDA_HOME: {cuda_home}")
-    logger.info(f"CUDA_PATH: {cuda_path}")
+
+    # Дополнительная диагностика PyTorch
+    logger.info(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+    logger.info(f"torch.cuda.device_count(): {torch.cuda.device_count() if torch.cuda.is_available() else 'N/A'}")
+    logger.info(f"torch.backends.cudnn.enabled: {torch.backends.cudnn.enabled}")
+    logger.info(f"torch.backends.cudnn.benchmark: {torch.backends.cudnn.benchmark}")
+    logger.info(f"torch.backends.cudnn.deterministic: {torch.backends.cudnn.deterministic}")
+
+    if USE_NVIDIA_GPU and torch.cuda.is_available():
+        torch.set_grad_enabled(False)
+        torch.backends.cudnn.benchmark = True
+        if torch.cuda.get_device_capability()[0] >= 8:
+            logger.info("GPU Ampere+ обнаружен. Включаю поддержку TF32 для ускорения.")
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+        logger.info("Глобальные оптимизации PyTorch для инференса применены.")
+        
+        # Дополнительная диагностика CUDA
+        logger.info(f"CUDA_HOME: {os.environ.get('CUDA_HOME', 'Не установлен')}")
+        logger.info(f"CUDA_PATH: {os.environ.get('CUDA_PATH', 'Не установлен')}")
+        logger.info(f"LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'Не установлен')}")
+    else:
+        logger.warning("CUDA недоступна или отключена. Оптимизации GPU не применены.")
+        
+        # Диагностика причин недоступности CUDA
+        logger.info("=== ДИАГНОСТИКА CUDA ===")
+        logger.info(f"torch.version.cuda: {torch.version.cuda}")
+        logger.info(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+        logger.info(f"USE_NVIDIA_GPU: {USE_NVIDIA_GPU}")
+        
+        # Проверяем переменные окружения
+        cuda_home = os.environ.get('CUDA_HOME')
+        cuda_path = os.environ.get('CUDA_PATH')
+        logger.info(f"CUDA_HOME: {cuda_home}")
+        logger.info(f"CUDA_PATH: {cuda_path}")
 
 # --- Инициализация локальной модели Silero TTS ---
 silero_model = None
 silero_device = None
 
-# Проверяем доступность torch.hub
-logger.info("=== ПРОВЕРКА TORCH.HUB ===")
-logger.info(f"torch.hub доступен: {hasattr(torch, 'hub')}")
-if hasattr(torch, 'hub'):
-    logger.info(f"torch.hub.load доступен: {hasattr(torch.hub, 'load')}")
-    logger.info(f"torch.hub.list доступен: {hasattr(torch.hub, 'list')}")
-    logger.info(f"torch.hub.help доступен: {hasattr(torch.hub, 'help')}")
+if USE_LOCAL:
+    # Проверяем доступность torch.hub
+    logger.info("=== ПРОВЕРКА TORCH.HUB ===")
+    logger.info(f"torch.hub доступен: {hasattr(torch, 'hub')}")
+    if hasattr(torch, 'hub'):
+        logger.info(f"torch.hub.load доступен: {hasattr(torch.hub, 'load')}")
+        logger.info(f"torch.hub.list доступен: {hasattr(torch.hub, 'list')}")
+        logger.info(f"torch.hub.help доступен: {hasattr(torch.hub, 'help')}")
 
 def load_silero_model_alternative():
     """Альтернативный способ загрузки модели Silero TTS"""
@@ -709,13 +725,16 @@ def load_silero_model():
         logger.error("=== ЗАГРУЗКА МОДЕЛИ ЗАВЕРШЕНА С ОШИБКОЙ ===")
         return False
 
-# Загружаем модель
-logger.info("=== ЗАГРУЗКА МОДЕЛИ SILERO TTS ===")
-if not load_silero_model():
-    logger.error("Не удалось загрузить модель Silero TTS!")
-    logger.error("Бот будет работать без TTS функциональности!")
+# Загружаем модель только в локальном режиме
+if USE_LOCAL:
+    logger.info("=== ЗАГРУЗКА МОДЕЛИ SILERO TTS ===")
+    if not load_silero_model():
+        logger.error("Не удалось загрузить модель Silero TTS!")
+        logger.error("Бот будет работать без TTS функциональности!")
+    else:
+        logger.info("=== МОДЕЛЬ SILERO TTS УСПЕШНО ЗАГРУЖЕНА ===")
 else:
-    logger.info("=== МОДЕЛЬ SILERO TTS УСПЕШНО ЗАГРУЖЕНА ===")
+    logger.info("Локальная модель Silero TTS не загружается (режим API).")
 
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
@@ -1190,7 +1209,11 @@ async def text_to_speech_silero(text: str) -> bytes:
         else:
             logger.info("ElevenLabs недоступен, переключаюсь на Silero TTS")
     
-    # Если ElevenLabs недоступен, используем Silero TTS
+    # Если ElevenLabs недоступен, используем Silero TTS только в локальном режиме
+    if not USE_LOCAL:
+        logger.warning("Локальный TTS отключен. Не удалось сгенерировать речь.")
+        return None
+
     if not silero_model or not silero_device:
         logger.error("Модель Silero TTS не загружена, озвучка невозможна.")
         return None
@@ -1363,37 +1386,43 @@ async def main():
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
     dp = Dispatcher()
     
-    # Проверка состояния GPU
-    logger.info("=== ПРОВЕРКА GPU ===")
-    gpu_status = check_gpu_status()
-    logger.info(f"Статус GPU: {gpu_status}")
-    
-    # Проверка доступности модели Silero TTS
-    logger.info("=== ПРОВЕРКА ДОСТУПНОСТИ МОДЕЛИ SILERO TTS ===")
-    if not check_silero_tts_availability():
-        logger.error("КРИТИЧЕСКАЯ ОШИБКА: Модель Silero TTS не доступна!")
-        await bot.send_message(ADMIN_ID, "❌ КРИТИЧЕСКАЯ ОШИБКА: Модель Silero TTS не доступна! Бот не может работать.")
-        logger.error("Бот завершает работу из-за недоступности модели TTS")
-        return
-    else:
-        logger.info("=== МОДЕЛЬ SILERO TTS ДОСТУПНА ===")
+    # Проверка состояния GPU и TTS только в локальном режиме
+    if USE_LOCAL:
+        # Проверка состояния GPU
+        logger.info("=== ПРОВЕРКА GPU ===")
+        gpu_status = check_gpu_status()
+        logger.info(f"Статус GPU: {gpu_status}")
         
-        # Тестируем модель перед запуском бота, только если включен debug
-        if DEBUG:
-            logger.info("=== ТЕСТИРОВАНИЕ МОДЕЛИ SILERO TTS ===")
-            logger.info("Тестируем работу Silero TTS... -  только если включен debug")
-            if not await test_silero_tts():
-                logger.error("КРИТИЧЕСКАЯ ОШИБКА: Тест модели Silero TTS не пройден!")
-                await bot.send_message(ADMIN_ID, "❌ КРИТИЧЕСКАЯ ОШИБКА: Тест модели Silero TTS не пройден! Бот не может работать.")
-                logger.error("Бот завершает работу из-за неудачного теста модели TTS")
-                return
-            else:
-                logger.info("=== ТЕСТ МОДЕЛИ SILERO TTS ПРОЙДЕН УСПЕШНО ===")
+        # Проверка доступности модели Silero TTS
+        logger.info("=== ПРОВЕРКА ДОСТУПНОСТИ МОДЕЛИ SILERO TTS ===")
+        if not check_silero_tts_availability():
+            logger.error("КРИТИЧЕСКАЯ ОШИБКА: Модель Silero TTS не доступна!")
+            await bot.send_message(ADMIN_ID, "❌ КРИТИЧЕСКАЯ ОШИБКА: Модель Silero TTS не доступна! Бот не может работать.")
+            logger.error("Бот завершает работу из-за недоступности модели TTS")
+            return
+        else:
+            logger.info("=== МОДЕЛЬ SILERO TTS ДОСТУПНА ===")
+            
+            # Тестируем модель перед запуском бота, только если включен debug
+            if DEBUG:
+                logger.info("=== ТЕСТИРОВАНИЕ МОДЕЛИ SILERO TTS ===")
+                logger.info("Тестируем работу Silero TTS... -  только если включен debug")
+                if not await test_silero_tts():
+                    logger.error("КРИТИЧЕСКАЯ ОШИБКА: Тест модели Silero TTS не пройден!")
+                    await bot.send_message(ADMIN_ID, "❌ КРИТИЧЕСКАЯ ОШИБКА: Тест модели Silero TTS не пройден! Бот не может работать.")
+                    logger.error("Бот завершает работу из-за неудачного теста модели TTS")
+                    return
+                else:
+                    logger.info("=== ТЕСТ МОДЕЛИ SILERO TTS ПРОЙДЕН УСПЕШНО ===")
+    else:
+        # В режиме API-only, нам не нужен GPU или локальная TTS
+        gpu_status = {'available': False, 'reason': 'API-only mode'}
+        logger.info("Работа в режиме API-only. Проверка GPU и локальной TTS пропущена.")
 
     @dp.message(Command("start", "help"))
     async def handle_start(message: types.Message):
         # Проверяем статус модели TTS
-        tts_status = "✅ Доступна" if check_silero_tts_availability() else "❌ Недоступна"
+        tts_status = "✅ Доступна" if not USE_LOCAL or check_silero_tts_availability() else "❌ Недоступна"
         elevenlabs_status = "✅ Доступен" if elevenlabs_available else "❌ Недоступен"
         
         await message.reply(
@@ -1439,174 +1468,176 @@ async def main():
             logger.error(f"Ошибка при получении ID: {e}")
             await message.reply(f"❌ Ошибка при получении ID: {str(e)}")
 
-    @dp.message(Command("gpu_status"))
-    async def handle_gpu_status(message: types.Message):
-        # Команда для проверки статуса GPU
-        try:
-            current_gpu_status = check_gpu_status()
-            if current_gpu_status['available']:
-                status_text = (
-                    f"🟢 **Статус GPU: Доступен**\n\n"
-                    f"**Устройство:** {current_gpu_status['device_name']}\n"
-                    f"**Всего памяти:** {current_gpu_status['total_memory'] / 1024**3:.1f} ГБ\n"
-                    f"**Выделено памяти:** {current_gpu_status['allocated_memory'] / 1024**3:.1f} ГБ\n"
-                    f"**Свободно памяти:** {(current_gpu_status['total_memory'] - current_gpu_status['allocated_memory']) / 1024**3:.1f} ГБ\n"
-                    f"**Версия CUDA:** {current_gpu_status.get('cuda_version', 'Неизвестно')}"
-                )
-            else:
-                reason = current_gpu_status.get('reason', 'Неизвестно')
-                error = current_gpu_status.get('error', '')
-                status_text = f"🔴 **Статус GPU: Не доступен**\n\n**Причина:** {reason}"
-                if error:
-                    status_text += f"\n**Ошибка:** {error}"
-                status_text += "\n\nИспользуется CPU для обработки."
-            
-            await message.reply(status_text, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Ошибка при получении статуса GPU: {e}")
-            await message.reply(f"❌ Ошибка при получении статуса GPU: {str(e)}")
-
-    @dp.message(Command("cleanup_gpu"))
-    async def handle_cleanup_gpu(message: types.Message):
-        # Команда для принудительной очистки памяти GPU
-        try:
-            if USE_NVIDIA_GPU and silero_device and silero_device.type == 'cuda':
-                cleanup_gpu_memory()
-                await message.reply("🧹 Память GPU успешно очищена!")
-            else:
-                await message.reply("ℹ️ GPU не используется, очистка не требуется.")
-        except Exception as e:
-            logger.error(f"Ошибка при очистке памяти GPU: {e}")
-            await message.reply(f"❌ Ошибка при очистке памяти GPU: {str(e)}")
-
-    @dp.message(Command("reload_tts"))
-    async def handle_reload_tts(message: types.Message):
-        # Команда для перезагрузки модели TTS
-        try:
-            global silero_model, silero_device
-            
-            await message.reply("🔄 Перезагружаю модель TTS...")
-            
-            # Очищаем память GPU перед перезагрузкой
-            if USE_NVIDIA_GPU and silero_device and silero_device.type == 'cuda':
-                cleanup_gpu_memory()
-            
-            # Перезагружаем модель
-            if load_silero_model():
-                logger.info("Модель TTS успешно перезагружена")
-                await message.reply("✅ Модель TTS успешно перезагружена!")
-            else:
-                logger.error("Не удалось перезагрузить модель TTS")
-                await message.reply("❌ Не удалось перезагрузить модель TTS!")
-                
-        except Exception as e:
-            logger.error(f"Ошибка при перезагрузке модели TTS: {e}")
-            await message.reply(f"❌ Ошибка при перезагрузке модели TTS: {str(e)}")
-
-    @dp.message(Command("versions"))
-    async def handle_versions(message: types.Message):
-        # Команда для проверки версий библиотек
-        try:
-            versions_text = (
-                f"📚 **Версии библиотек:**\n\n"
-                f"**PyTorch:** {torch.__version__}\n"
-                f"**CUDA:** {torch.version.cuda}\n"
-                f"**cuDNN:** {torch.backends.cudnn.version()}\n"
-                f"**Python:** {sys.version.split()[0]}\n"
-                f"**USE_NVIDIA_GPU:** {USE_NVIDIA_GPU}\n"
-                f"**CUDA доступна:** {torch.cuda.is_available()}"
-            )
-            await message.reply(versions_text, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Ошибка при получении версий: {e}")
-            await message.reply(f"❌ Ошибка при получении версий: {str(e)}")
-
-    @dp.message(Command("test_tts"))
-    async def handle_test_tts(message: types.Message):
-        # Команда для тестирования TTS
-        try:
-            # Проверяем доступность модели TTS
-            if not check_silero_tts_availability():
-                await message.reply("❌ Модель TTS недоступна! Попробуйте команду /reload_tts")
-                return
-            
-            sent_msg = await message.reply("🧪 Тестирую TTS...")
-            
-            # Используем нашу функцию тестирования
-            if await test_silero_tts():
-                await message.reply("✅ TTS работает корректно!")
-            else:
-                await message.reply("❌ TTS не работает!")
-            
-            # Удаляем сообщение о тестировании
+    if USE_LOCAL:
+        @dp.message(Command("gpu_status"))
+        async def handle_gpu_status(message: types.Message):
+            # Команда для проверки статуса GPU
             try:
-                await bot.delete_message(message.chat.id, sent_msg.message_id)
-            except:
-                pass
-                
-        except Exception as e:
-            logger.error(f"Ошибка при тестировании TTS: {e}")
-            await message.reply(f"❌ Ошибка при тестировании TTS: {str(e)}")
-
-    @dp.message(Command("switch_device"))
-    async def handle_switch_device(message: types.Message):
-        # Команда для переключения между GPU и CPU
-        try:
-            global silero_model, silero_device
-            
-            if silero_device and silero_device.type == 'cuda':
-                # Переключаемся на CPU
-                silero_device = torch.device('cpu')
-                if silero_model is not None:
-                    silero_model = silero_model.to(silero_device)
-                    logger.info("Переключились на CPU")
-                    await message.reply("🔄 Переключились на CPU")
+                current_gpu_status = check_gpu_status()
+                if current_gpu_status['available']:
+                    status_text = (
+                        f"🟢 **Статус GPU: Доступен**\n\n"
+                        f"**Устройство:** {current_gpu_status['device_name']}\n"
+                        f"**Всего памяти:** {current_gpu_status['total_memory'] / 1024**3:.1f} ГБ\n"
+                        f"**Выделено памяти:** {current_gpu_status['allocated_memory'] / 1024**3:.1f} ГБ\n"
+                        f"**Свободно памяти:** {(current_gpu_status['total_memory'] - current_gpu_status['allocated_memory']) / 1024**3:.1f} ГБ\n"
+                        f"**Версия CUDA:** {current_gpu_status.get('cuda_version', 'Неизвестно')}"
+                    )
                 else:
-                    await message.reply("❌ Модель TTS не загружена")
-            else:
-                # Переключаемся на GPU
-                if torch.cuda.is_available():
-                    silero_device = torch.device('cuda')
+                    reason = current_gpu_status.get('reason', 'Неизвестно')
+                    error = current_gpu_status.get('error', '')
+                    status_text = f"🔴 **Статус GPU: Не доступен**\n\n**Причина:** {reason}"
+                    if error:
+                        status_text += f"\n**Ошибка:** {error}"
+                    status_text += "\n\nИспользуется CPU для обработки."
+                
+                await message.reply(status_text, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Ошибка при получении статуса GPU: {e}")
+                await message.reply(f"❌ Ошибка при получении статуса GPU: {str(e)}")
+
+        @dp.message(Command("cleanup_gpu"))
+        async def handle_cleanup_gpu(message: types.Message):
+            # Команда для принудительной очистки памяти GPU
+            try:
+                if USE_NVIDIA_GPU and silero_device and silero_device.type == 'cuda':
+                    cleanup_gpu_memory()
+                    await message.reply("🧹 Память GPU успешно очищена!")
+                else:
+                    await message.reply("ℹ️ GPU не используется, очистка не требуется.")
+            except Exception as e:
+                logger.error(f"Ошибка при очистке памяти GPU: {e}")
+                await message.reply(f"❌ Ошибка при очистке памяти GPU: {str(e)}")
+
+        @dp.message(Command("reload_tts"))
+        async def handle_reload_tts(message: types.Message):
+            # Команда для перезагрузки модели TTS
+            try:
+                global silero_model, silero_device
+                
+                await message.reply("🔄 Перезагружаю модель TTS...")
+                
+                # Очищаем память GPU перед перезагрузкой
+                if USE_NVIDIA_GPU and silero_device and silero_device.type == 'cuda':
+                    cleanup_gpu_memory()
+                
+                # Перезагружаем модель
+                if load_silero_model():
+                    logger.info("Модель TTS успешно перезагружена")
+                    await message.reply("✅ Модель TTS успешно перезагружена!")
+                else:
+                    logger.error("Не удалось перезагрузить модель TTS")
+                    await message.reply("❌ Не удалось перезагрузить модель TTS!")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при перезагрузке модели TTS: {e}")
+                await message.reply(f"❌ Ошибка при перезагрузке модели TTS: {str(e)}")
+
+        @dp.message(Command("versions"))
+        async def handle_versions(message: types.Message):
+            # Команда для проверки версий библиотек
+            try:
+                versions_text = (
+                    f"📚 **Версии библиотек:**\n\n"
+                    f"**PyTorch:** {torch.__version__}\n"
+                    f"**CUDA:** {torch.version.cuda}\n"
+                    f"**cuDNN:** {torch.backends.cudnn.version()}\n"
+                    f"**Python:** {sys.version.split()[0]}\n"
+                    f"**USE_NVIDIA_GPU:** {USE_NVIDIA_GPU}\n"
+                    f"**CUDA доступна:** {torch.cuda.is_available()}"
+                )
+                await message.reply(versions_text, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Ошибка при получении версий: {e}")
+                await message.reply(f"❌ Ошибка при получении версий: {str(e)}")
+
+        @dp.message(Command("test_tts"))
+        async def handle_test_tts(message: types.Message):
+            # Команда для тестирования TTS
+            try:
+                # Проверяем доступность модели TTS
+                if not check_silero_tts_availability():
+                    await message.reply("❌ Модель TTS недоступна! Попробуйте команду /reload_tts")
+                    return
+                
+                sent_msg = await message.reply("🧪 Тестирую TTS...")
+                
+                # Используем нашу функцию тестирования
+                if await test_silero_tts():
+                    await message.reply("✅ TTS работает корректно!")
+                else:
+                    await message.reply("❌ TTS не работает!")
+                
+                # Удаляем сообщение о тестировании
+                try:
+                    await bot.delete_message(message.chat.id, sent_msg.message_id)
+                except:
+                    pass
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при тестировании TTS: {e}")
+                await message.reply(f"❌ Ошибка при тестировании TTS: {str(e)}")
+
+        @dp.message(Command("switch_device"))
+        async def handle_switch_device(message: types.Message):
+            # Команда для переключения между GPU и CPU
+            try:
+                global silero_model, silero_device
+                
+                if silero_device and silero_device.type == 'cuda':
+                    # Переключаемся на CPU
+                    silero_device = torch.device('cpu')
                     if silero_model is not None:
                         silero_model = silero_model.to(silero_device)
-                        logger.info("Переключились на GPU")
-                        await message.reply("🔄 Переключились на GPU")
+                        logger.info("Переключились на CPU")
+                        await message.reply("🔄 Переключились на CPU")
                     else:
                         await message.reply("❌ Модель TTS не загружена")
                 else:
-                    await message.reply("❌ GPU недоступен")
-                    
-        except Exception as e:
-            logger.error(f"Ошибка при переключении устройства: {e}")
-            await message.reply(f"❌ Ошибка при переключении устройства: {str(e)}")
+                    # Переключаемся на GPU
+                    if torch.cuda.is_available():
+                        silero_device = torch.device('cuda')
+                        if silero_model is not None:
+                            silero_model = silero_model.to(silero_device)
+                            logger.info("Переключились на GPU")
+                            await message.reply("🔄 Переключились на GPU")
+                        else:
+                            await message.reply("❌ Модель TTS не загружена")
+                    else:
+                        await message.reply("❌ GPU недоступен")
+                        
+                await message.reply("🔄 Переключились на устройство")
+            except Exception as e:
+                logger.error(f"Ошибка при переключении устройства: {e}")
+                await message.reply(f"❌ Ошибка при переключении устройства: {str(e)}")
 
-    @dp.message(Command("force_reload_tts"))
-    async def handle_force_reload_tts(message: types.Message):
-        # Команда для принудительной перезагрузки модели TTS
-        try:
-            global silero_model, silero_device
-            
-            await message.reply("🔄 Принудительно перезагружаю модель TTS...")
-            
-            # Очищаем память GPU
-            if USE_NVIDIA_GPU and silero_device and silero_device.type == 'cuda':
-                cleanup_gpu_memory()
-            
-            # Сбрасываем глобальные переменные
-            silero_model = None
-            silero_device = None
-            
-            # Перезагружаем модель
-            if load_silero_model():
-                logger.info("Модель TTS успешно принудительно перезагружена")
-                await message.reply("✅ Модель TTS успешно принудительно перезагружена!")
-            else:
-                logger.error("Не удалось принудительно перезагрузить модель TTS")
-                await message.reply("❌ Не удалось принудительно перезагрузить модель TTS!")
+        @dp.message(Command("force_reload_tts"))
+        async def handle_force_reload_tts(message: types.Message):
+            # Команда для принудительной перезагрузки модели TTS
+            try:
+                global silero_model, silero_device
                 
-        except Exception as e:
-            logger.error(f"Ошибка при принудительной перезагрузке модели TTS: {e}")
-            await message.reply(f"❌ Ошибка при принудительной перезагрузке модели TTS: {str(e)}")
+                await message.reply("🔄 Принудительно перезагружаю модель TTS...")
+                
+                # Очищаем память GPU
+                if USE_NVIDIA_GPU and silero_device and silero_device.type == 'cuda':
+                    cleanup_gpu_memory()
+                
+                # Сбрасываем глобальные переменные
+                silero_model = None
+                silero_device = None
+                
+                # Перезагружаем модель
+                if load_silero_model():
+                    logger.info("Модель TTS успешно принудительно перезагружена")
+                    await message.reply("✅ Модель TTS успешно принудительно перезагружена!")
+                else:
+                    logger.error("Не удалось принудительно перезагрузить модель TTS")
+                    await message.reply("❌ Не удалось принудительно перезагрузить модель TTS!")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при принудительной перезагрузке модели TTS: {e}")
+                await message.reply(f"❌ Ошибка при принудительной перезагрузке модели TTS: {str(e)}")
 
     @dp.message(Command("elevenlabs_status"))
     async def handle_elevenlabs_status(message: types.Message):
