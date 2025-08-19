@@ -7,3 +7,4 @@ uvicorn
 websockets
 Pillow
 httpx
+num2words

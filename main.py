@@ -1336,7 +1336,99 @@ class TextPreprocessor:
         self.special_chars_pattern = re.compile(r'[^\sа-яА-ЯёЁa-zA-Z0-9\.\,\!\?\;\:\-]')
         # Добавляем паттерн для поиска ссылок
         self.url_pattern = re.compile(r'https?://[^\s]+|www\.[^\s]+|[^\s]+\.[a-z]{2,}(?:/[^\s]*)?', re.IGNORECASE)
-        logger.info("Инициализирован препроцессор текста для TTS (с сохранением цифр).")
+        # Паттерны для поиска чисел и денежных сумм
+        self.number_pattern = re.compile(r'\b\d+[.,]?\d*\b')
+        self.currency_pattern = re.compile(r'\b\d+[.,]?\d*\s*(рубл[а-я]*|копе[её]к[а-я]*|₽|руб|коп)\b', re.IGNORECASE)
+        self.money_pattern = re.compile(r'\b(\d+)[.,](\d{2})\s*(рубл[а-я]*|₽|руб)\b', re.IGNORECASE)
+        
+        # Инициализируем num2words для русского языка
+        try:
+            from num2words import num2words
+            self.num2words = num2words
+            self.has_num2words = True
+            logger.info("Инициализирован препроцессор текста для TTS с поддержкой num2words для русского языка.")
+        except ImportError:
+            self.has_num2words = False
+            logger.warning("Библиотека num2words не установлена. Числа будут обрабатываться базовыми методами.")
+
+    def convert_number_to_words(self, number_str: str) -> str:
+        """Преобразует число в слова на русском языке"""
+        if not self.has_num2words:
+            return number_str
+        
+        try:
+            # Заменяем запятую на точку для корректного float
+            clean_number = number_str.replace(',', '.')
+            number = float(clean_number)
+            
+            # Преобразуем в слова
+            if number.is_integer():
+                return self.num2words(int(number), lang='ru')
+            else:
+                return self.num2words(number, lang='ru')
+        except (ValueError, TypeError):
+            return number_str
+
+    def convert_currency_to_words(self, match) -> str:
+        """Преобразует денежную сумму в слова с указанием валюты"""
+        if not self.has_num2words:
+            return match.group(0)
+        
+        try:
+            amount_str = match.group(1).replace(',', '.')
+            cents_str = match.group(2)
+            currency = match.group(3)
+            
+            amount = float(amount_str)
+            cents = int(cents_str)
+            
+            # Формируем словесное представление
+            if amount == 0:
+                amount_words = "ноль"
+            else:
+                amount_words = self.num2words(int(amount), lang='ru')
+            
+            # Определяем правильную форму слова "рубль"
+            if amount % 10 == 1 and amount % 100 != 11:
+                ruble_form = "рубль"
+            elif 2 <= amount % 10 <= 4 and (amount % 100 < 10 or amount % 100 > 20):
+                ruble_form = "рубля"
+            else:
+                ruble_form = "рублей"
+            
+            # Формируем копейки
+            if cents == 0:
+                cents_part = ""
+            elif cents == 1:
+                cents_part = " одна копейка"
+            elif 2 <= cents <= 4:
+                cents_part = f" {self.num2words(cents, lang='ru')} копейки"
+            else:
+                cents_part = f" {self.num2words(cents, lang='ru')} копеек"
+            
+            return f"{amount_words} {ruble_form}{cents_part}"
+            
+        except (ValueError, TypeError):
+            return match.group(0)
+
+    def convert_simple_currency(self, match) -> str:
+        """Преобразует простую денежную сумму в слова"""
+        if not self.has_num2words:
+            return match.group(0)
+        
+        try:
+            currency_text = match.group(0)
+            # Извлекаем число из текста
+            number_match = re.search(r'\d+[.,]?\d*', currency_text)
+            if number_match:
+                number_str = number_match.group(0)
+                converted_number = self.convert_number_to_words(number_str)
+                
+                # Заменяем число в исходном тексте
+                return currency_text.replace(number_str, converted_number)
+            return currency_text
+        except:
+            return match.group(0)
 
     def preprocess(self, text: str) -> str:
         original_length = len(text)
@@ -1349,6 +1441,15 @@ class TextPreprocessor:
         if not text.strip():
             logger.warning(f"Текст стал пустым после удаления ссылок. Исходный текст: '{original_text}'")
             return ""
+        
+        # Преобразуем денежные суммы с копейками (например: "744,94 рубля")
+        text = self.money_pattern.sub(self.convert_currency_to_words, text)
+        
+        # Преобразуем простые денежные суммы
+        text = self.currency_pattern.sub(self.convert_simple_currency, text)
+        
+        # Преобразуем оставшиеся числа в слова
+        text = self.number_pattern.sub(self.convert_number_to_words, text)
         
         text = self.whitespace_pattern.sub(' ', text).strip()
         text = self.special_chars_pattern.sub('', text)
@@ -1365,6 +1466,16 @@ async def text_to_speech_elevenlabs(text: str) -> Tuple[Optional[bytes], Optiona
     """Генерация речи через ElevenLabs API с автоматическим переключением ключей"""
     if not elevenlabs_manager:
         return None, "Менеджер ElevenLabs не инициализирован."
+    
+    # Предобработка текста для улучшения произношения чисел
+    text_preprocessor = TextPreprocessor()
+    processed_text = text_preprocessor.preprocess(text)
+    
+    if not processed_text:
+        return None, "Текст для озвучки пуст после предобработки."
+    
+    logger.info(f"Исходный текст: '{text[:100]}...'")
+    logger.info(f"Обработанный текст: '{processed_text[:100]}...'")
     
     max_retries = len(elevenlabs_manager.api_keys)
     last_error = None
@@ -1386,7 +1497,7 @@ async def text_to_speech_elevenlabs(text: str) -> Tuple[Optional[bytes], Optiona
                     voice_id=ELEVENLABS_MALE_VOICE_ID,
                     optimize_streaming_latency="0",
                     output_format=ELEVENLABS_OUTPUT_FORMAT,
-                    text=text,
+                    text=processed_text,  # Используем обработанный текст
                     model_id=ELEVENLABS_MODEL_ID,
                     voice_settings=VoiceSettings(
                         stability=0.0,
@@ -1407,7 +1518,7 @@ async def text_to_speech_elevenlabs(text: str) -> Tuple[Optional[bytes], Optiona
             
             if audio_bytes:
                 # Записываем использование
-                characters_used = len(text)
+                characters_used = len(processed_text)
                 await elevenlabs_manager.record_usage(key_index, characters_used)
                 
                 logger.info(f"Успешно сгенерировано {len(audio_bytes)} байт аудио, использовано {characters_used} символов")
