@@ -42,6 +42,7 @@ USE_LOCAL = USE_LOCAL_STR.lower() in ('true', '1', 't')
 USE_NVIDIA_GPU = True
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID_STR = os.getenv("ADMIN_ID")  # ID мой
+# Примечание: Для ADMIN по умолчанию S2T заблокирован, T2S разблокирован
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")  # Добавляем API ключ ElevenLabs
 ELEVENLABS_API_KEY2 = os.getenv("ELEVENLABS_API_KEY2")  # Добавляем второй API ключ ElevenLabs
@@ -100,7 +101,14 @@ class UserBlockSettings:
     blocked_by: int  # ID администратора, который заблокировал
 
 class UserBlockManager:
-    """Менеджер для управления блокировкой пользователей"""
+    """Менеджер для управления блокировкой пользователей
+    
+    Логика по умолчанию для ADMIN:
+    - S2T (распознавание голоса в текст): ЗАБЛОКИРОВАНО по умолчанию
+    - T2S (озвучивание текста): РАЗБЛОКИРОВАНО по умолчанию
+    
+    Для обычных пользователей все функции доступны по умолчанию.
+    """
     
     def __init__(self):
         self.block_file = Path("user_blocks.json")
@@ -140,12 +148,18 @@ class UserBlockManager:
     def is_user_blocked_s2t(self, user_id: int) -> bool:
         """Проверяет, заблокирован ли пользователь для распознавания речи"""
         if user_id not in self.blocked_users:
+            # Для ADMIN по умолчанию блокируем S2T (распознавание голоса)
+            if user_id == ADMIN_ID:
+                return True
             return False
         return self.blocked_users[user_id].block_s2t
     
     def is_user_blocked_t2s(self, user_id: int) -> bool:
         """Проверяет, заблокирован ли пользователь для озвучивания текста"""
         if user_id not in self.blocked_users:
+            # Для ADMIN по умолчанию разрешаем T2S (озвучивание текста)
+            if user_id == ADMIN_ID:
+                return False
             return False
         return self.blocked_users[user_id].block_t2s
     
@@ -153,14 +167,17 @@ class UserBlockManager:
         """Переключает блокировку распознавания речи для пользователя"""
         if user_id not in self.blocked_users:
             # Создаем нового заблокированного пользователя
+            # Для ADMIN по умолчанию S2T заблокирован, T2S разблокирован
+            default_s2t = True if user_id == ADMIN_ID else False
+            default_t2s = False if user_id == ADMIN_ID else False
             self.blocked_users[user_id] = UserBlockSettings(
                 user_id=user_id,
-                block_s2t=True,
-                block_t2s=False,
+                block_s2t=default_s2t,
+                block_t2s=default_t2s,
                 blocked_at=datetime.now().isoformat(),
                 blocked_by=admin_id
             )
-            action = "заблокирован"
+            action = "заблокирован" if default_s2t else "разблокирован"
         else:
             # Переключаем существующую блокировку
             current_block = self.blocked_users[user_id].block_s2t
@@ -176,14 +193,17 @@ class UserBlockManager:
         """Переключает блокировку озвучивания текста для пользователя"""
         if user_id not in self.blocked_users:
             # Создаем нового заблокированного пользователя
+            # Для ADMIN по умолчанию S2T заблокирован, T2S разблокирован
+            default_s2t = True if user_id == ADMIN_ID else False
+            default_t2s = False if user_id == ADMIN_ID else False
             self.blocked_users[user_id] = UserBlockSettings(
                 user_id=user_id,
-                block_s2t=False,
-                block_t2s=True,
+                block_s2t=default_s2t,
+                block_t2s=default_t2s,
                 blocked_at=datetime.now().isoformat(),
                 blocked_by=admin_id
             )
-            action = "заблокирован"
+            action = "заблокирован" if default_t2s else "разблокирован"
         else:
             # Переключаем существующую блокировку
             current_block = self.blocked_users[user_id].block_t2s
@@ -2460,7 +2480,10 @@ async def main():
         
         # Проверяем, не заблокирован ли пользователь для распознавания речи
         if user_block_manager.is_user_blocked_s2t(user_id):
-            logger.info(f"Пользователь {user_id} заблокирован для S2T - сообщение игнорируется")
+            if user_id == ADMIN_ID:
+                logger.info(f"ADMIN {user_id} заблокирован для S2T по умолчанию - голосовое сообщение игнорируется")
+            else:
+                logger.info(f"Пользователь {user_id} заблокирован для S2T - сообщение игнорируется")
             return
         
         sent_msg = await message.reply("🔄 Обрабатываю голосовое сообщение...")
@@ -2499,6 +2522,8 @@ async def main():
                 await message.reply("🚫 У вас заблокировано озвучивание текста. Проверьте настройки блокировки.")
                 logger.info(f"Администратор {user_id} заблокирован для T2S")
                 return
+            
+            logger.info(f"ADMIN {user_id} разблокирован для T2S по умолчанию - продолжаю озвучку")
             
             sent_msg = await message.reply("🔄 Озвучиваю сообщение...")
             await process_text_to_voice(bot, message.text, message.chat.id, user_id)
