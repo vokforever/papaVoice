@@ -86,6 +86,132 @@ async def run_blocking(func, *args, **kwargs):
     logger.debug(f"Блокирующая функция {func.__name__} завершена")
     return result
 
+# --- КЛАСС ДЛЯ УПРАВЛЕНИЯ БЛОКИРОВКОЙ ПОЛЬЗОВАТЕЛЕЙ ---
+@dataclass
+class UserBlockSettings:
+    """Настройки блокировки для пользователя"""
+    user_id: int
+    block_s2t: bool  # Блокировка speech-to-text (распознавание речи)
+    block_t2s: bool  # Блокировка text-to-speech (озвучивание текста)
+    blocked_at: str
+    blocked_by: int  # ID администратора, который заблокировал
+
+class UserBlockManager:
+    """Менеджер для управления блокировкой пользователей"""
+    
+    def __init__(self):
+        self.block_file = Path("user_blocks.json")
+        self.blocked_users: Dict[int, UserBlockSettings] = {}
+        self._load_blocks()
+        logger.info("UserBlockManager инициализирован")
+    
+    def _load_blocks(self):
+        """Загрузка блокировок из файла"""
+        if self.block_file.exists():
+            try:
+                with open(self.block_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for user_id_str, user_data in data.items():
+                        user_id = int(user_id_str)
+                        self.blocked_users[user_id] = UserBlockSettings(**user_data)
+                logger.info(f"Загружено {len(self.blocked_users)} заблокированных пользователей")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки блокировок: {e}")
+                self.blocked_users = {}
+        else:
+            logger.info("Файл блокировок не найден, создаем новый")
+    
+    def _save_blocks(self):
+        """Сохранение блокировок в файл"""
+        try:
+            data = {}
+            for user_id, settings in self.blocked_users.items():
+                data[str(user_id)] = asdict(settings)
+            
+            with open(self.block_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.debug("Блокировки сохранены в файл")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения блокировок: {e}")
+    
+    def is_user_blocked_s2t(self, user_id: int) -> bool:
+        """Проверяет, заблокирован ли пользователь для распознавания речи"""
+        if user_id not in self.blocked_users:
+            return False
+        return self.blocked_users[user_id].block_s2t
+    
+    def is_user_blocked_t2s(self, user_id: int) -> bool:
+        """Проверяет, заблокирован ли пользователь для озвучивания текста"""
+        if user_id not in self.blocked_users:
+            return False
+        return self.blocked_users[user_id].block_t2s
+    
+    def toggle_user_block_s2t(self, user_id: int, admin_id: int) -> Tuple[bool, str]:
+        """Переключает блокировку распознавания речи для пользователя"""
+        if user_id not in self.blocked_users:
+            # Создаем нового заблокированного пользователя
+            self.blocked_users[user_id] = UserBlockSettings(
+                user_id=user_id,
+                block_s2t=True,
+                block_t2s=False,
+                blocked_at=datetime.now().isoformat(),
+                blocked_by=admin_id
+            )
+            action = "заблокирован"
+        else:
+            # Переключаем существующую блокировку
+            current_block = self.blocked_users[user_id].block_s2t
+            self.blocked_users[user_id].block_s2t = not current_block
+            self.blocked_users[user_id].blocked_at = datetime.now().isoformat()
+            self.blocked_users[user_id].blocked_by = admin_id
+            action = "разблокирован" if not current_block else "заблокирован"
+        
+        self._save_blocks()
+        return self.blocked_users[user_id].block_s2t, action
+    
+    def toggle_user_block_t2s(self, user_id: int, admin_id: int) -> Tuple[bool, str]:
+        """Переключает блокировку озвучивания текста для пользователя"""
+        if user_id not in self.blocked_users:
+            # Создаем нового заблокированного пользователя
+            self.blocked_users[user_id] = UserBlockSettings(
+                user_id=user_id,
+                block_s2t=False,
+                block_t2s=True,
+                blocked_at=datetime.now().isoformat(),
+                blocked_by=admin_id
+            )
+            action = "заблокирован"
+        else:
+            # Переключаем существующую блокировку
+            current_block = self.blocked_users[user_id].block_t2s
+            self.blocked_users[user_id].block_t2s = not current_block
+            self.blocked_users[user_id].blocked_at = datetime.now().isoformat()
+            self.blocked_users[user_id].blocked_by = admin_id
+            action = "разблокирован" if not current_block else "заблокирован"
+        
+        self._save_blocks()
+        return self.blocked_users[user_id].block_t2s, action
+    
+    def get_user_block_status(self, user_id: int) -> Optional[UserBlockSettings]:
+        """Получает статус блокировки пользователя"""
+        return self.blocked_users.get(user_id)
+    
+    def get_all_blocked_users(self) -> List[UserBlockSettings]:
+        """Получает список всех заблокированных пользователей"""
+        return list(self.blocked_users.values())
+    
+    def unblock_user_completely(self, user_id: int) -> bool:
+        """Полностью разблокирует пользователя"""
+        if user_id in self.blocked_users:
+            del self.blocked_users[user_id]
+            self._save_blocks()
+            logger.info(f"Пользователь {user_id} полностью разблокирован")
+            return True
+        return False
+
+# Глобальный экземпляр менеджера блокировок
+user_block_manager = UserBlockManager()
+
 # --- КЛАССЫ ДЛЯ УПРАВЛЕНИЯ ELEVENLABS ---
 @dataclass
 class ElevenLabsKeyUsage:
@@ -1025,7 +1151,6 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
                         timestamp_granularities=["word", "segment"]
                     )
                 
-                # Проверяем, что transcription - это объект с полем text (verbose_json формат)
                 if hasattr(transcription, "text"):
                     # Получаем текст из поля text
                     text = transcription.text
@@ -1458,6 +1583,12 @@ async def main():
             "• `/reset_elevenlabs_stats` - сбросить статистику (админ)\n"
             "• `/versions` - версии библиотек\n"
             "• `/admin_id` - узнать свой ID\n\n"
+            "**Команды блокировки (только для админа):**\n"
+            "• `/block_s2t` - заблокировать/разблокировать распознавание речи\n"
+            "• `/block_t2s` - заблокировать/разблокировать озвучивание текста\n"
+            "• `/block_status` - проверить статус блокировки пользователя\n"
+            "• `/block_list` - список всех заблокированных пользователей\n"
+            "• `/unblock_user` - полностью разблокировать пользователя\n\n"
             "Все сообщения обрабатываются на русском языке."
         )
 
@@ -1767,12 +1898,209 @@ async def main():
             logger.error(f"Ошибка при получении информации о системе: {e}")
             await message.reply(f"❌ Ошибка при получении информации о системе: {str(e)}")
 
+    @dp.message(Command("block_s2t"))
+    async def handle_block_s2t(message: types.Message):
+        # Команда для блокировки/разблокировки распознавания речи у пользователя
+        try:
+            # Проверяем, что команда от администратора
+            if message.from_user.id != ADMIN_ID:
+                await message.reply("❌ У вас нет прав для выполнения этой команды.")
+                return
+            
+            # Получаем ID пользователя из ответа на сообщение
+            if not message.reply_to_message:
+                await message.reply("❌ Ответьте на сообщение пользователя, которого хотите заблокировать/разблокировать.")
+                return
+            
+            target_user_id = message.reply_to_message.from_user.id
+            target_user_name = message.reply_to_message.from_user.full_name or f"Пользователь {target_user_id}"
+            
+            # Переключаем блокировку
+            is_blocked, action = user_block_manager.toggle_user_block_s2t(target_user_id, message.from_user.id)
+            
+            status_emoji = "🔒" if is_blocked else "🔓"
+            status_text = "заблокирован" if is_blocked else "разблокирован"
+            
+            await message.reply(
+                f"{status_emoji} Пользователь **{target_user_name}** {status_text} для распознавания речи.\n"
+                f"ID: `{target_user_id}`\n"
+                f"Действие: {action}",
+                parse_mode="Markdown"
+            )
+            
+            logger.info(f"Администратор {message.from_user.id} {action} пользователя {target_user_id} для S2T")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при блокировке S2T: {e}")
+            await message.reply(f"❌ Ошибка при блокировке: {str(e)}")
+
+    @dp.message(Command("block_t2s"))
+    async def handle_block_t2s(message: types.Message):
+        # Команда для блокировки/разблокировки озвучивания текста у пользователя
+        try:
+            # Проверяем, что команда от администратора
+            if message.from_user.id != ADMIN_ID:
+                await message.reply("❌ У вас нет прав для выполнения этой команды.")
+                return
+            
+            # Получаем ID пользователя из ответа на сообщение
+            if not message.reply_to_message:
+                await message.reply("❌ Ответьте на сообщение пользователя, которого хотите заблокировать/разблокировать.")
+                return
+            
+            target_user_id = message.reply_to_message.from_user.id
+            target_user_name = message.reply_to_message.from_user.full_name or f"Пользователь {target_user_id}"
+            
+            # Переключаем блокировку
+            is_blocked, action = user_block_manager.toggle_user_block_t2s(target_user_id, message.from_user.id)
+            
+            status_emoji = "🔒" if is_blocked else "🔓"
+            status_text = "заблокирован" if is_blocked else "разблокирован"
+            
+            await message.reply(
+                f"{status_emoji} Пользователь **{target_user_name}** {status_text} для озвучивания текста.\n"
+                f"ID: `{target_user_id}`\n"
+                f"Действие: {action}",
+                parse_mode="Markdown"
+            )
+            
+            logger.info(f"Администратор {message.from_user.id} {action} пользователя {target_user_id} для T2S")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при блокировке T2S: {e}")
+            await message.reply(f"❌ Ошибка при блокировке: {str(e)}")
+
+    @dp.message(Command("block_status"))
+    async def handle_block_status(message: types.Message):
+        # Команда для просмотра статуса блокировки пользователя
+        try:
+            # Проверяем, что команда от администратора
+            if message.from_user.id != ADMIN_ID:
+                await message.reply("❌ У вас нет прав для выполнения этой команды.")
+                return
+            
+            # Получаем ID пользователя из ответа на сообщение
+            if not message.reply_to_message:
+                await message.reply("❌ Ответьте на сообщение пользователя, чтобы узнать его статус блокировки.")
+                return
+            
+            target_user_id = message.reply_to_message.from_user.id
+            target_user_name = message.reply_to_message.from_user.full_name or f"Пользователь {target_user_id}"
+            
+            # Получаем статус блокировки
+            block_status = user_block_manager.get_user_block_status(target_user_id)
+            
+            if not block_status:
+                await message.reply(
+                    f"🔓 Пользователь **{target_user_name}** не заблокирован.\n"
+                    f"ID: `{target_user_id}`",
+                    parse_mode="Markdown"
+                )
+            else:
+                s2t_status = "🔒 Заблокирован" if block_status.block_s2t else "🔓 Разблокирован"
+                t2s_status = "🔒 Заблокирован" if block_status.block_t2s else "🔓 Разблокирован"
+                
+                await message.reply(
+                    f"📊 **Статус блокировки пользователя {target_user_name}:**\n\n"
+                    f"**ID:** `{target_user_id}`\n"
+                    f"**Распознавание речи (S2T):** {s2t_status}\n"
+                    f"**Озвучивание текста (T2S):** {t2s_status}\n"
+                    f"**Заблокирован:** {block_status.blocked_at}\n"
+                    f"**Администратор:** `{block_status.blocked_by}`",
+                    parse_mode="Markdown"
+                )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении статуса блокировки: {e}")
+            await message.reply(f"❌ Ошибка при получении статуса: {str(e)}")
+
+    @dp.message(Command("block_list"))
+    async def handle_block_list(message: types.Message):
+        # Команда для просмотра списка всех заблокированных пользователей
+        try:
+            # Проверяем, что команда от администратора
+            if message.from_user.id != ADMIN_ID:
+                await message.reply("❌ У вас нет прав для выполнения этой команды.")
+                return
+            
+            # Получаем список заблокированных пользователей
+            blocked_users = user_block_manager.get_all_blocked_users()
+            
+            if not blocked_users:
+                await message.reply("📋 Список заблокированных пользователей пуст.")
+                return
+            
+            # Формируем список
+            block_list = "📋 **Список заблокированных пользователей:**\n\n"
+            
+            for user in blocked_users:
+                s2t_icon = "🔒" if user.block_s2t else "🔓"
+                t2s_icon = "🔒" if user.block_t2s else "🔓"
+                
+                block_list += (
+                    f"**ID:** `{user.user_id}`\n"
+                    f"**S2T:** {s2t_icon} **T2S:** {t2s_icon}\n"
+                    f"**Заблокирован:** {user.blocked_at}\n"
+                    f"**Администратор:** `{user.blocked_by}`\n"
+                    f"{'─' * 30}\n"
+                )
+            
+            await message.reply(block_list, parse_mode="Markdown")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка блокировок: {e}")
+            await message.reply(f"❌ Ошибка при получении списка: {str(e)}")
+
+    @dp.message(Command("unblock_user"))
+    async def handle_unblock_user(message: types.Message):
+        # Команда для полной разблокировки пользователя
+        try:
+            # Проверяем, что команда от администратора
+            if message.from_user.id != ADMIN_ID:
+                await message.reply("❌ У вас нет прав для выполнения этой команды.")
+                return
+            
+            # Получаем ID пользователя из ответа на сообщение
+            if not message.reply_to_message:
+                await message.reply("❌ Ответьте на сообщение пользователя, которого хотите разблокировать.")
+                return
+            
+            target_user_id = message.reply_to_message.from_user.id
+            target_user_name = message.reply_to_message.from_user.full_name or f"Пользователь {target_user_id}"
+            
+            # Разблокируем пользователя
+            if user_block_manager.unblock_user_completely(target_user_id):
+                await message.reply(
+                    f"🔓 Пользователь **{target_user_name}** полностью разблокирован.\n"
+                    f"ID: `{target_user_id}`",
+                    parse_mode="Markdown"
+                )
+                logger.info(f"Администратор {message.from_user.id} полностью разблокировал пользователя {target_user_id}")
+            else:
+                await message.reply(
+                    f"ℹ️ Пользователь **{target_user_name}** не был заблокирован.\n"
+                    f"ID: `{target_user_id}`",
+                    parse_mode="Markdown"
+                )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при разблокировке пользователя: {e}")
+            await message.reply(f"❌ Ошибка при разблокировке: {str(e)}")
+
     @dp.message(F.voice)
     async def handle_voice(message: types.Message):
         # Обрабатываем голосовые сообщения от всех участников
-        logger.info(f"Получено голосовое сообщение от пользователя {message.from_user.id}")
+        user_id = message.from_user.id
+        logger.info(f"Получено голосовое сообщение от пользователя {user_id}")
+        
+        # Проверяем, не заблокирован ли пользователь для распознавания речи
+        if user_block_manager.is_user_blocked_s2t(user_id):
+            await message.reply("🚫 У вас заблокировано распознавание речи. Обратитесь к администратору.")
+            logger.info(f"Пользователь {user_id} заблокирован для S2T")
+            return
+        
         sent_msg = await message.reply("🔄 Обрабатываю голосовое сообщение...")
-        await process_voice_to_text(bot, message.voice, message.chat.id, sent_msg.message_id, message.from_user.id)
+        await process_voice_to_text(bot, message.voice, message.chat.id, sent_msg.message_id, user_id)
         # Удаляем сообщение о обработке
         try:
             await bot.delete_message(message.chat.id, sent_msg.message_id)
@@ -1782,14 +2110,22 @@ async def main():
     @dp.message(F.text & ~F.command)
     async def handle_text(message: types.Message):
         # Добавляем логирование для отладки
-        logger.info(f"Получено текстовое сообщение от пользователя {message.from_user.id}")
-        logger.info(f"ADMIN_ID: {ADMIN_ID}, Сравнение: {message.from_user.id == ADMIN_ID}")
+        user_id = message.from_user.id
+        logger.info(f"Получено текстовое сообщение от пользователя {user_id}")
+        logger.info(f"ADMIN_ID: {ADMIN_ID}, Сравнение: {user_id == ADMIN_ID}")
 
         # Озвучиваем только сообщения от папы (ADMIN_ID)
-        if message.from_user.id == ADMIN_ID:
+        if user_id == ADMIN_ID:
             logger.info(f"Сообщение от ADMIN_ID, начинаю озвучку")
+            
+            # Проверяем, не заблокирован ли администратор для озвучивания текста
+            if user_block_manager.is_user_blocked_t2s(user_id):
+                await message.reply("🚫 У вас заблокировано озвучивание текста. Проверьте настройки блокировки.")
+                logger.info(f"Администратор {user_id} заблокирован для T2S")
+                return
+            
             sent_msg = await message.reply("🔄 Озвучиваю сообщение...")
-            await process_text_to_voice(bot, message.text, message.chat.id, message.from_user.id)
+            await process_text_to_voice(bot, message.text, message.chat.id, user_id)
             # Удаляем сообщение о обработке
             try:
                 await bot.delete_message(message.chat.id, sent_msg.message_id)
