@@ -1,36 +1,31 @@
-# Используем официальный образ Python ка базовый
+# Используем официальный образ Python как базовый
 FROM python:3.11-slim
 
 # Устанавливаем рабочую директорию внутри контейнера
 WORKDIR /app
 
+# Устанавливаем системные зависимости
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Копируем файл зависимостей
 COPY requirements.txt .
 
-# Устанавливаем ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg
-
-# Устанавливаем зависимости
+# Устанавливаем Python зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем только main.py, а не все файлы
-COPY main.py .
+# Копируем исходный код
+COPY . .
 
-# Создаем директорию для данных
-RUN mkdir -p data
+# Создаем директорию для аудио файлов
+RUN mkdir -p audio_files/cache
 
-# Устанавливаем переменную окружения, чтобы приложение работало в режиме API
+# Устанавливаем переменную окружения для режима API
 ENV USE_LOCAL=false
 
-# Эти переменные окружения здесь указаны с "dummy" значениями.
-# Реальные значения должны быть настроены в Coolify в разделе "Variables" вашего сервиса.
-ENV OPENAI_API_KEY="dummy" \
-    TELEGRAM_BOT_TOKEN="dummy" \
-    GROQ_API_KEY="dummy" \
-    ELEVENLABS_API_KEY="dummy" \
-    ELEVENLABS_API_KEY2="dummy" \
-    ADMIN_ID="dummy" \
-    GROQ_TRANSLATION_MODEL="deepseek-r1-distill-llama-70b"
+# Устанавливаем порт для CapRover (если понадобится)
+EXPOSE 8080
 
 # Команда для запуска приложения при старте контейнера
 CMD ["python", "main.py"]

@@ -1,0 +1,23 @@
+name: Deploy Python TG Bot to CapRover
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to CapRover
+        uses: caprover/deploy-from-github@v1.0.1
+        with:
+          server: ${{ secrets.CAPROVER_SERVER }}
+          app: ${{ secrets.CAPROVER_APP }}
+          token: ${{ secrets.CAPROVER_APP_TOKEN }}
+          branch: main
