@@ -1351,12 +1351,14 @@ class TextPreprocessor:
             self.has_num2words = False
             logger.warning("Библиотека num2words не установлена. Числа будут обрабатываться базовыми методами.")
 
-    def convert_number_to_words(self, number_str: str) -> str:
+    def convert_number_to_words(self, match: re.Match) -> str:
         """Преобразует число в слова на русском языке"""
         if not self.has_num2words:
-            return number_str
+            return match.group(0)
         
         try:
+            # Получаем строку из match объекта
+            number_str = match.group(0)
             # Заменяем запятую на точку для корректного float
             clean_number = number_str.replace(',', '.')
             number = float(clean_number)
@@ -1367,9 +1369,9 @@ class TextPreprocessor:
             else:
                 return self.num2words(number, lang='ru')
         except (ValueError, TypeError):
-            return number_str
+            return match.group(0)
 
-    def convert_currency_to_words(self, match) -> str:
+    def convert_currency_to_words(self, match: re.Match) -> str:
         """Преобразует денежную сумму в слова с указанием валюты"""
         if not self.has_num2words:
             return match.group(0)
@@ -1411,7 +1413,7 @@ class TextPreprocessor:
         except (ValueError, TypeError):
             return match.group(0)
 
-    def convert_simple_currency(self, match) -> str:
+    def convert_simple_currency(self, match: re.Match) -> str:
         """Преобразует простую денежную сумму в слова"""
         if not self.has_num2words:
             return match.group(0)
