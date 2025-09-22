@@ -18,6 +18,7 @@ import platform
 import subprocess
 import httpx
 from functools import partial  # Добавляем импорт partial для run_blocking
+from functools import lru_cache  # Добавляем для кэширования
 from dataclasses import dataclass, asdict  # Добавляем dataclass для структурирования данных
 from typing import List, Dict, Optional, Tuple  # Добавляем типы для аннотаций
 from dotenv import load_dotenv
@@ -621,6 +622,28 @@ async_elevenlabs_client = None
 # --- Инициализация менеджера ElevenLabs ---
 elevenlabs_manager = None
 
+# --- КЭШ ДЛЯ ОПТИМИЗАЦИИ УДАЛЕННОГО СЕРВЕРА ---
+tts_cache = {}  # Простой кэш для TTS результатов
+cache_max_size = 50 if not USE_LOCAL else 100  # Меньший кэш для удаленного сервера
+
+def get_cache_key(text: str, voice_id: str = "default") -> str:
+    """Создает ключ кэша для текста и голоса"""
+    return hashlib.md5(f"{text}_{voice_id}".encode()).hexdigest()
+
+def get_from_cache(cache_key: str) -> Optional[bytes]:
+    """Получает данные из кэша"""
+    return tts_cache.get(cache_key)
+
+def add_to_cache(cache_key: str, audio_data: bytes) -> None:
+    """Добавляет данные в кэш с ограничением размера"""
+    if len(tts_cache) >= cache_max_size:
+        # Удаляем самый старый элемент (FIFO)
+        oldest_key = next(iter(tts_cache))
+        del tts_cache[oldest_key]
+    
+    tts_cache[cache_key] = audio_data
+    logger.debug(f"Добавлено в кэш: {len(audio_data)} байт, размер кэша: {len(tts_cache)}")
+
 def initialize_elevenlabs_manager():
     """Инициализация менеджера ElevenLabs"""
     global elevenlabs_manager, elevenlabs_client, async_elevenlabs_client
@@ -757,12 +780,10 @@ if USE_LOCAL:
         logger.info(f"torch.version.cuda: {torch.version.cuda}")
         logger.info(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
         logger.info(f"USE_NVIDIA_GPU: {USE_NVIDIA_GPU}")
-        
-        # Проверяем переменные окружения
-        cuda_home = os.environ.get('CUDA_HOME')
-        cuda_path = os.environ.get('CUDA_PATH')
-        logger.info(f"CUDA_HOME: {cuda_home}")
-        logger.info(f"CUDA_PATH: {cuda_path}")
+else:
+    logger.info("=== РЕЖИМ УДАЛЕННОГО СЕРВЕРА ===")
+    logger.info("PyTorch и локальные модели отключены для минимизации нагрузки на сервер")
+    logger.info("Используется только API-режим (ElevenLabs, Groq)")
 
 # --- Инициализация локальной модели Silero TTS ---
 silero_model = None
@@ -1341,7 +1362,7 @@ def check_silero_tts_availability():
 MAX_CHUNK_DURATION = 600  # 10 минут максимум для одного чанка
 CHUNK_OVERLAP = 5  # 5 секунд перекрытия между частями
 
-async def split_large_audio(audio_path: Path, max_duration: int = MAX_CHUNK_DURATION) -> List[Path]:
+async def split_large_audio(audio_path: Path, max_duration: int = None) -> List[Path]:
     """
     Разбивает большие аудиофайлы на части для обработки в Groq API
     
@@ -1352,6 +1373,10 @@ async def split_large_audio(audio_path: Path, max_duration: int = MAX_CHUNK_DURA
     Returns:
         List[Path]: Список путей к частям аудиофайла
     """
+    # Оптимизация для удаленного сервера
+    if max_duration is None:
+        max_duration = 300 if not USE_LOCAL else MAX_CHUNK_DURATION  # 5 минут для удаленного сервера
+    
     logger.info(f"=== НАЧАЛО РАЗБИЕНИЯ АУДИО НА ЧАСТИ ===")
     
     # Загружаем аудио
@@ -1394,7 +1419,7 @@ async def split_large_audio(audio_path: Path, max_duration: int = MAX_CHUNK_DURA
     logger.info(f"=== РАЗБИЕНИЕ ЗАВЕРШЕНО: {len(chunks_paths)} частей ===")
     return chunks_paths
 
-async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 3) -> str:
+async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = None) -> str:
     """
     Транскрибирует аудио с улучшенной обработкой rate limiting и экспоненциальной задержкой
     
@@ -1406,6 +1431,10 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
         str: Транскрибированный текст
     """
     logger.info("=== НАЧАЛО TRANSCRIBE_AUDIO_GROQ_WITH_RETRY ===")
+    
+    # Оптимизация для удаленного сервера
+    if max_retries is None:
+        max_retries = 1 if not USE_LOCAL else 3
     
     if not groq_client:
         raise ConnectionError("Клиент Groq API не инициализирован.")
@@ -1525,26 +1554,32 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
                 recommended_wait_time = extract_wait_time_from_error(error_str)
                 
                 if recommended_wait_time:
-                    # Используем рекомендуемое время ожидания
-                    wait_time = recommended_wait_time + random.uniform(1, 5)  # Добавляем небольшой джиттер
+                    # Используем рекомендуемое время ожидания (сокращено для удаленного сервера)
+                    jitter = random.uniform(0.5, 2) if not USE_LOCAL else random.uniform(1, 5)
+                    wait_time = min(recommended_wait_time + jitter, 30)  # Максимум 30 секунд для удаленного сервера
                     logger.info(f"Ожидание {wait_time:.2f} секунд по рекомендации API")
                     await asyncio.sleep(wait_time)
                 else:
                     # Используем экспоненциальную задержку, если не удалось извлечь время
-                    wait_time = groq_rate_limiter.get_exponential_backoff_delay(attempt)
+                    base_delay = 0.5 if not USE_LOCAL else 1.0
+                    wait_time = groq_rate_limiter.get_exponential_backoff_delay(attempt, base_delay=base_delay)
+                    wait_time = min(wait_time, 15)  # Максимум 15 секунд для удаленного сервера
                     logger.info(f"Экспоненциальная задержка: {wait_time:.2f} секунд")
                     await asyncio.sleep(wait_time)
                     
             elif "APIError" in error_str or "HTTP" in error_str:
                 # Другие API ошибки - используем более короткую экспоненциальную задержку
                 if attempt < max_retries:
-                    wait_time = groq_rate_limiter.get_exponential_backoff_delay(attempt, base_delay=0.5)
+                    base_delay = 0.3 if not USE_LOCAL else 0.5
+                    wait_time = groq_rate_limiter.get_exponential_backoff_delay(attempt, base_delay=base_delay)
+                    wait_time = min(wait_time, 10)  # Максимум 10 секунд для удаленного сервера
                     logger.info(f"API ошибка, ожидание {wait_time:.2f} секунд")
                     await asyncio.sleep(wait_time)
             else:
                 # Для других типов ошибок - короткая задержка
                 if attempt < max_retries:
-                    wait_time = 2.0 + random.uniform(0, 2)
+                    wait_time = 1.0 + random.uniform(0, 1) if not USE_LOCAL else 2.0 + random.uniform(0, 2)
+                    wait_time = min(wait_time, 5)  # Максимум 5 секунд для удаленного сервера
                     logger.info(f"Общая ошибка, ожидание {wait_time:.2f} секунд")
                     await asyncio.sleep(wait_time)
             
@@ -1569,9 +1604,14 @@ async def transcribe_large_audio_with_chunks(audio_path: Path) -> str:
     """
     logger.info("=== НАЧАЛО ТРАНСКРИПЦИИ БОЛЬШОГО АУДИО ===")
     
-    # Проверяем длительность аудио
+    # Оптимизация для удаленного сервера - ограничиваем размер файла
+    max_file_duration = 1800 if not USE_LOCAL else 3600  # 30 минут для удаленного сервера
     audio = AudioSegment.from_file(str(audio_path))
     duration_seconds = audio.duration_seconds
+    
+    if not USE_LOCAL and duration_seconds > max_file_duration:
+        logger.warning(f"Файл слишком большой для удаленного сервера ({duration_seconds:.1f}с > {max_file_duration}с)")
+        return "Файл слишком большой для обработки на удаленном сервере. Пожалуйста, отправьте файл короче 30 минут."
     
     logger.info(f"Длительность аудио: {duration_seconds:.2f} секунд")
     
@@ -1853,6 +1893,13 @@ async def text_to_speech_elevenlabs(text: str) -> Tuple[Optional[bytes], Optiona
     if not processed_text:
         return None, "Текст для озвучки пуст после предобработки."
     
+    # Проверяем кэш для оптимизации удаленного сервера
+    cache_key = get_cache_key(processed_text, "elevenlabs")
+    cached_audio = get_from_cache(cache_key)
+    if cached_audio:
+        logger.info("Найден результат в кэше, возвращаем без API запроса")
+        return cached_audio, None
+    
     logger.info(f"Исходный текст: '{text[:100]}...'")
     logger.info(f"Обработанный текст: '{processed_text[:100]}...'")
     
@@ -1899,6 +1946,9 @@ async def text_to_speech_elevenlabs(text: str) -> Tuple[Optional[bytes], Optiona
                 # Записываем использование
                 characters_used = len(processed_text)
                 await elevenlabs_manager.record_usage(key_index, characters_used)
+                
+                # Сохраняем в кэш для оптимизации удаленного сервера
+                add_to_cache(cache_key, audio_bytes)
                 
                 logger.info(f"Успешно сгенерировано {len(audio_bytes)} байт аудио, использовано {characters_used} символов")
                 return audio_bytes, None
@@ -2188,6 +2238,17 @@ async def process_audio_to_text(bot: Bot, audio_obj, chat_id: int, message_id: i
         audio_type: Тип аудио ('voice', 'audio', 'video_note', 'document')
     """
     logger.info(f"=== НАЧАЛО PROCESS_AUDIO_TO_TEXT ({audio_type.upper()}) ===")
+    
+    # Оптимизация для удаленного сервера - проверяем размер файла
+    if not USE_LOCAL:
+        file_size = getattr(audio_obj, 'file_size', 0)
+        max_file_size = 50 * 1024 * 1024  # 50MB для удаленного сервера
+        if file_size > max_file_size:
+            error_msg = f"Файл слишком большой для удаленного сервера ({file_size / 1024 / 1024:.1f}MB > 50MB)"
+            logger.warning(error_msg)
+            await bot.send_message(chat_id, error_msg)
+            return
+    
     files_to_clean = []
     try:
         logger.info(f"Начинаю обработку {audio_type} от пользователя {user_id}")
@@ -3409,7 +3470,9 @@ async def check_network_connectivity(host="api.elevenlabs.io"):
         command = ['ping', param, '1', host]
         
         # Выполняем ping
-        result = await asyncio.to_thread(subprocess.run, command, capture_output=True, text=True, timeout=10)
+        # Оптимизация таймаута ping для удаленного сервера
+        ping_timeout = 5 if not USE_LOCAL else 10
+        result = await asyncio.to_thread(subprocess.run, command, capture_output=True, text=True, timeout=ping_timeout)
         
         if result.returncode == 0:
             logger.info(f"✅ Успешный ping к {host}:\n{result.stdout}")
@@ -3437,7 +3500,9 @@ async def check_elevenlabs_api_connectivity(api_key: str):
     headers = {"xi-api-key": api_key}
     
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # Оптимизация таймаута для удаленного сервера
+        timeout_value = 5.0 if not USE_LOCAL else 10.0
+        async with httpx.AsyncClient(timeout=timeout_value) as client:
             response = await client.get(url, headers=headers)
             
             if response.status_code == 200:
