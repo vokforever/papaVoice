@@ -1797,21 +1797,81 @@ async def analyze_image_with_groq(image_bytes: bytes, user_id: int = None) -> Tu
 
 
 # --- ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ ЗДАЧ ---
-async def process_voice_to_text(bot: Bot, voice: types.Voice, chat_id: int, message_id: int, user_id: int):
-    logger.info("=== НАЧАЛО PROCESS_VOICE_TO_TEXT ===")
+async def process_audio_to_text(bot: Bot, audio_obj, chat_id: int, message_id: int, user_id: int, audio_type: str):
+    """
+    Универсальная функция для обработки любых аудио файлов в текст
+    
+    Args:
+        bot: Экземпляр бота
+        audio_obj: Объект аудио (Voice, Audio, VideoNote, Document)
+        chat_id: ID чата
+        message_id: ID сообщения
+        user_id: ID пользователя
+        audio_type: Тип аудио ('voice', 'audio', 'video_note', 'document')
+    """
+    logger.info(f"=== НАЧАЛО PROCESS_AUDIO_TO_TEXT ({audio_type.upper()}) ===")
     files_to_clean = []
     try:
-        logger.info(f"Начинаю обработку голосового сообщения от пользователя {user_id}")
+        logger.info(f"Начинаю обработку {audio_type} от пользователя {user_id}")
         
-        # Скачиваем голосовое сообщение
-        voice_info = await bot.get_file(voice.file_id)
-        voice_path = AUDIO_FOLDER / f"{voice_info.file_unique_id}.ogg"
-        await bot.download_file(voice_info.file_path, destination=voice_path)
-        files_to_clean.append(voice_path)
+        # Получаем file_id и размер файла в зависимости от типа
+        if audio_type == 'voice':
+            file_id = audio_obj.file_id
+            file_unique_id = audio_obj.file_unique_id
+            file_size = getattr(audio_obj, 'file_size', 0)
+        elif audio_type == 'audio':
+            file_id = audio_obj.file_id
+            file_unique_id = audio_obj.file_unique_id
+            file_size = getattr(audio_obj, 'file_size', 0)
+        elif audio_type == 'video_note':
+            file_id = audio_obj.file_id
+            file_unique_id = audio_obj.file_unique_id
+            file_size = getattr(audio_obj, 'file_size', 0)
+        elif audio_type == 'document':
+            file_id = audio_obj.file_id
+            file_unique_id = audio_obj.file_unique_id
+            file_size = getattr(audio_obj, 'file_size', 0)
+        else:
+            raise ValueError(f"Неподдерживаемый тип аудио: {audio_type}")
+        
+        # Скачиваем аудио файл
+        audio_info = await bot.get_file(file_id)
+        
+        # Определяем расширение файла
+        original_extension = Path(audio_info.file_path).suffix or '.tmp'
+        audio_path = AUDIO_FOLDER / f"{file_unique_id}{original_extension}"
+        await bot.download_file(audio_info.file_path, destination=audio_path)
+        files_to_clean.append(audio_path)
         
         # Конвертируем в формат, подходящий для Whisper
-        wav_path = voice_path.with_suffix('.wav')
-        audio = AudioSegment.from_ogg(voice_path)
+        wav_path = audio_path.with_suffix('.wav')
+        
+        try:
+            # Пытаемся загрузить аудио автоматически
+            audio = AudioSegment.from_file(str(audio_path))
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить аудио автоматически: {e}")
+            # Пробуем разные форматы
+            formats_to_try = [
+                ('MP3', lambda p: AudioSegment.from_mp3(str(p))),
+                ('WAV', lambda p: AudioSegment.from_wav(str(p))),
+                ('OGG', lambda p: AudioSegment.from_ogg(str(p))),
+                ('M4A', lambda p: AudioSegment.from_file(str(p), format="m4a")),
+                ('FLAC', lambda p: AudioSegment.from_file(str(p), format="flac")),
+                ('AAC', lambda p: AudioSegment.from_file(str(p), format="aac"))
+            ]
+            
+            last_error = None
+            for format_name, loader_func in formats_to_try:
+                try:
+                    audio = loader_func(audio_path)
+                    logger.info(f"Успешно загружен аудио файл как {format_name}")
+                    break
+                except Exception as e:
+                    last_error = e
+                    logger.debug(f"Не удалось загрузить как {format_name}: {e}")
+            else:
+                raise Exception(f"Не удалось загрузить аудио файл. Поддерживаемые форматы: MP3, WAV, OGG, M4A, FLAC, AAC. Последняя ошибка: {last_error}")
         
         # Улучшаем качество аудио перед распознаванием
         audio = audio.set_frame_rate(16000)  # Устанавливаем частоту 16 кГц как рекомендовано
@@ -1823,26 +1883,23 @@ async def process_voice_to_text(bot: Bot, voice: types.Voice, chat_id: int, mess
         recognized_text = await transcribe_audio_groq_with_retry(wav_path)
         
         if not recognized_text.strip():
-            await bot.send_message(chat_id, "❌ Не удалось распознать речь в голосовом сообщении.")
+            await bot.send_message(chat_id, f"❌ Не удалось распознать речь в {audio_type}.")
             return
         
-        # Отправляем распознанный текст
-        await bot.send_message(
-            chat_id,
-            f"📝 Распознанный текст:\n{recognized_text}"
-        )
+        # Проверяем размер транскрипции и отправляем соответствующим образом
+        await send_transcription_response(bot, chat_id, recognized_text, file_size)
         
-        logger.info("=== PROCESS_VOICE_TO_TEXT ЗАВЕРШЕН УСПЕШНО ===")
+        logger.info(f"=== PROCESS_AUDIO_TO_TEXT ({audio_type.upper()}) ЗАВЕРШЕН УСПЕШНО ===")
 
     except Exception as e:
-        logger.exception(f"КРИТИЧЕСКАЯ ОШИБКА в process_voice_to_text для чата {chat_id}")
+        logger.exception(f"КРИТИЧЕСКАЯ ОШИБКА в process_audio_to_text ({audio_type}) для чата {chat_id}")
         error_text = html.escape(str(e)[:250])
         error_message = f"❌ Произошла критическая ошибка: <code>{error_text}</code>"
         try:
             await bot.send_message(chat_id, error_message, parse_mode="HTML")
         except TelegramBadRequest:
             await bot.send_message(chat_id, "❌ Произошла критическая ошибка.")
-        logger.error("=== PROCESS_VOICE_TO_TEXT ЗАВЕРШЕН С ОШИБКОЙ ===")
+        logger.error(f"=== PROCESS_AUDIO_TO_TEXT ({audio_type.upper()}) ЗАВЕРШЕН С ОШИБКОЙ ===")
     finally:
         logger.info(f"Начинаю очистку {len(files_to_clean)} временных файлов...")
         for f in set(files_to_clean):
@@ -1850,6 +1907,64 @@ async def process_voice_to_text(bot: Bot, voice: types.Voice, chat_id: int, mess
         if USE_NVIDIA_GPU:
             logger.debug("Очистка памяти GPU после завершения задачи...")
             cleanup_gpu_memory()
+
+
+async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_size: int):
+    """
+    Отправляет транскрипцию как текст или файл в зависимости от размера
+    
+    Args:
+        bot: Экземпляр бота
+        chat_id: ID чата
+        text: Распознанный текст
+        file_size: Размер исходного аудио файла в байтах
+    """
+    # Лимит в 1 МБ = 1048576 байт
+    SIZE_LIMIT = 1048576
+    
+    if file_size > SIZE_LIMIT:
+        logger.info(f"Файл большой ({file_size} байт > {SIZE_LIMIT}), отправляю как TXT файл")
+        
+        # Создаем markdown контент
+        markdown_content = f"""# Транскрипция аудиозаписи
+
+**Размер исходного файла:** {file_size / 1024 / 1024:.2f} МБ  
+**Дата обработки:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+
+---
+
+## Распознанный текст:
+
+{text}
+
+---
+
+*Создано ботом papaVoiceTG*
+"""
+        
+        # Создаем файл в памяти
+        file_content = markdown_content.encode('utf-8')
+        filename = f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        
+        # Отправляем файл
+        await bot.send_document(
+            chat_id,
+            document=types.BufferedInputFile(file_content, filename=filename),
+            caption="📝 Транскрипция большого аудиофайла"
+        )
+    else:
+        logger.info(f"Файл небольшой ({file_size} байт), отправляю как обычное сообщение")
+        # Отправляем как обычное текстовое сообщение
+        await bot.send_message(
+            chat_id,
+            f"📝 Распознанный текст:\n{text}"
+        )
+
+
+# Оставляем старую функцию для совместимости
+async def process_voice_to_text(bot: Bot, voice: types.Voice, chat_id: int, message_id: int, user_id: int):
+    """Обертка для старой функции - использует новую универсальную функцию"""
+    await process_audio_to_text(bot, voice, chat_id, message_id, user_id, 'voice')
 
 
 async def process_text_to_voice(bot: Bot, text: str, chat_id: int, user_id: int):
@@ -2600,7 +2715,90 @@ async def main():
             return
         
         sent_msg = await message.reply("🔄 Обрабатываю голосовое сообщение...")
-        await process_voice_to_text(bot, message.voice, message.chat.id, sent_msg.message_id, user_id)
+        await process_audio_to_text(bot, message.voice, message.chat.id, sent_msg.message_id, user_id, 'voice')
+        # Удаляем сообщение о обработке
+        try:
+            await bot.delete_message(message.chat.id, sent_msg.message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение о обработке: {e}")
+
+    @dp.message(F.audio)
+    async def handle_audio(message: types.Message):
+        # Обрабатываем аудио файлы от всех участников
+        user_id = message.from_user.id
+        logger.info(f"Получен аудио файл от пользователя {user_id}")
+        
+        # Проверяем, не заблокирован ли пользователь для распознавания речи
+        if user_block_manager.is_user_blocked_s2t(user_id):
+            if user_id == ADMIN_ID:
+                logger.info(f"ADMIN {user_id} заблокирован для S2T по умолчанию - аудио файл игнорируется")
+            else:
+                logger.info(f"Пользователь {user_id} заблокирован для S2T - аудио файл игнорируется")
+            return
+        
+        sent_msg = await message.reply("🔄 Обрабатываю аудио файл...")
+        await process_audio_to_text(bot, message.audio, message.chat.id, sent_msg.message_id, user_id, 'audio')
+        # Удаляем сообщение о обработке
+        try:
+            await bot.delete_message(message.chat.id, sent_msg.message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение о обработке: {e}")
+
+    @dp.message(F.video_note)
+    async def handle_video_note(message: types.Message):
+        # Обрабатываем видео сообщения (кружки) от всех участников
+        user_id = message.from_user.id
+        logger.info(f"Получено видео сообщение от пользователя {user_id}")
+        
+        # Проверяем, не заблокирован ли пользователь для распознавания речи
+        if user_block_manager.is_user_blocked_s2t(user_id):
+            if user_id == ADMIN_ID:
+                logger.info(f"ADMIN {user_id} заблокирован для S2T по умолчанию - видео сообщение игнорируется")
+            else:
+                logger.info(f"Пользователь {user_id} заблокирован для S2T - видео сообщение игнорируется")
+            return
+        
+        sent_msg = await message.reply("🔄 Обрабатываю видео сообщение...")
+        await process_audio_to_text(bot, message.video_note, message.chat.id, sent_msg.message_id, user_id, 'video_note')
+        # Удаляем сообщение о обработке
+        try:
+            await bot.delete_message(message.chat.id, sent_msg.message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение о обработке: {e}")
+
+    @dp.message(F.document)
+    async def handle_document(message: types.Message):
+        # Обрабатываем документы (только аудио файлы) от всех участников
+        user_id = message.from_user.id
+        document = message.document
+        
+        # Проверяем, является ли документ аудио файлом
+        audio_extensions = ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.wma', '.opus']
+        audio_mime_types = ['audio/', 'application/ogg']
+        
+        is_audio_file = False
+        if document.file_name:
+            is_audio_file = any(document.file_name.lower().endswith(ext) for ext in audio_extensions)
+        
+        if document.mime_type:
+            is_audio_file = is_audio_file or any(document.mime_type.startswith(mime) for mime in audio_mime_types)
+        
+        if not is_audio_file:
+            # Игнорируем не-аудио документы
+            return
+        
+        logger.info(f"Получен аудио документ от пользователя {user_id}: {document.file_name}")
+        
+        # Проверяем, не заблокирован ли пользователь для распознавания речи
+        if user_block_manager.is_user_blocked_s2t(user_id):
+            if user_id == ADMIN_ID:
+                logger.info(f"ADMIN {user_id} заблокирован для S2T по умолчанию - аудио документ игнорируется")
+            else:
+                logger.info(f"Пользователь {user_id} заблокирован для S2T - аудио документ игнорируется")
+            return
+        
+        sent_msg = await message.reply("🔄 Обрабатываю аудио документ...")
+        await process_audio_to_text(bot, message.document, message.chat.id, sent_msg.message_id, user_id, 'document')
         # Удаляем сообщение о обработке
         try:
             await bot.delete_message(message.chat.id, sent_msg.message_id)
