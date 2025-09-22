@@ -1205,6 +1205,64 @@ def check_silero_tts_availability():
 
 
 # --- ЛОГИКА РАСПОЗНАВАНИЯ РЕЧИ ---
+
+# Константы для работы с большими аудиофайлами
+MAX_CHUNK_DURATION = 600  # 10 минут максимум для одного чанка
+CHUNK_OVERLAP = 5  # 5 секунд перекрытия между частями
+
+async def split_large_audio(audio_path: Path, max_duration: int = MAX_CHUNK_DURATION) -> List[Path]:
+    """
+    Разбивает большие аудиофайлы на части для обработки в Groq API
+    
+    Args:
+        audio_path: Path к аудиофайлу
+        max_duration: Максимальная длительность одной части в секундах
+        
+    Returns:
+        List[Path]: Список путей к частям аудиофайла
+    """
+    logger.info(f"=== НАЧАЛО РАЗБИЕНИЯ АУДИО НА ЧАСТИ ===")
+    
+    # Загружаем аудио
+    audio = AudioSegment.from_file(str(audio_path))
+    duration_seconds = audio.duration_seconds
+    
+    logger.info(f"Длительность аудио: {duration_seconds:.2f} секунд")
+    
+    # Если файл не слишком большой, возвращаем оригинал
+    if duration_seconds <= max_duration:
+        logger.info("Аудиофайл не требует разбиения")
+        return [audio_path]
+    
+    # Вычисляем количество частей
+    num_chunks = int(duration_seconds / max_duration) + 1
+    chunk_duration_ms = max_duration * 1000  # AudioSegment работает в миллисекундах
+    overlap_ms = CHUNK_OVERLAP * 1000
+    
+    logger.info(f"Разбиваем на {num_chunks} частей по {max_duration} секунд")
+    
+    chunks_paths = []
+    base_name = audio_path.stem
+    parent_dir = audio_path.parent
+    
+    for i in range(num_chunks):
+        # Вычисляем границы части с перекрытием
+        start_ms = max(0, i * chunk_duration_ms - (overlap_ms if i > 0 else 0))
+        end_ms = min(len(audio), (i + 1) * chunk_duration_ms + overlap_ms)
+        
+        # Извлекаем часть
+        chunk = audio[start_ms:end_ms]
+        
+        # Сохраняем часть
+        chunk_path = parent_dir / f"{base_name}_chunk_{i+1:02d}.wav"
+        chunk.export(str(chunk_path), format="wav")
+        chunks_paths.append(chunk_path)
+        
+        logger.info(f"Создана часть {i+1}/{num_chunks}: {chunk_path.name} ({chunk.duration_seconds:.1f}с)")
+    
+    logger.info(f"=== РАЗБИЕНИЕ ЗАВЕРШЕНО: {len(chunks_paths)} частей ===")
+    return chunks_paths
+
 async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 2) -> str:
     logger.info("=== НАЧАЛО TRANSCRIBE_AUDIO_GROQ_WITH_RETRY ===")
     
@@ -1315,6 +1373,86 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
     
     logger.info("=== TRANSCRIBE_AUDIO_GROQ_WITH_RETRY ЗАВЕРШЕН УСПЕШНО ===")
     return ""
+
+
+async def transcribe_large_audio_with_chunks(audio_path: Path) -> str:
+    """
+    Транскрибирует большие аудиофайлы, разбивая их на части
+    
+    Args:
+        audio_path: Path к аудиофайлу
+        
+    Returns:
+        str: Объединенная транскрипция всех частей
+    """
+    logger.info("=== НАЧАЛО ТРАНСКРИПЦИИ БОЛЬШОГО АУДИО ===")
+    
+    # Проверяем длительность аудио
+    audio = AudioSegment.from_file(str(audio_path))
+    duration_seconds = audio.duration_seconds
+    
+    logger.info(f"Длительность аудио: {duration_seconds:.2f} секунд")
+    
+    # Если файл небольшой, используем обычную транскрипцию
+    if duration_seconds <= MAX_CHUNK_DURATION:
+        logger.info("Используем стандартную транскрипцию")
+        return await transcribe_audio_groq_with_retry(audio_path)
+    
+    # Разбиваем на части
+    logger.info("Аудио слишком длинное, разбиваем на части")
+    chunk_paths = await split_large_audio(audio_path)
+    
+    transcriptions = []
+    failed_chunks = []
+    
+    try:
+        for i, chunk_path in enumerate(chunk_paths, 1):
+            logger.info(f"Транскрибирую часть {i}/{len(chunk_paths)}: {chunk_path.name}")
+            
+            try:
+                chunk_transcription = await transcribe_audio_groq_with_retry(chunk_path)
+                
+                if chunk_transcription.strip():
+                    # Добавляем метку времени для лучшего понимания последовательности
+                    time_marker = f"[Часть {i}]" if len(chunk_paths) > 1 else ""
+                    transcriptions.append(f"{time_marker} {chunk_transcription.strip()}")
+                    logger.info(f"Часть {i} транскрибирована успешно ({len(chunk_transcription)} символов)")
+                else:
+                    logger.warning(f"Часть {i} вернула пустую транскрипцию")
+                    failed_chunks.append(i)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка транскрипции части {i}: {e}")
+                failed_chunks.append(i)
+                
+    finally:
+        # Очищаем временные части
+        logger.info("Удаляю временные части...")
+        for chunk_path in chunk_paths:
+            if chunk_path != audio_path:  # Не удаляем оригинальный файл
+                try:
+                    chunk_path.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить {chunk_path}: {e}")
+    
+    # Объединяем результаты
+    if not transcriptions:
+        raise Exception("Не удалось транскрибировать ни одну часть аудиофайла")
+    
+    # Объединяем транскрипции
+    combined_text = " ".join(transcriptions)
+    
+    # Информация о процессе
+    success_rate = (len(chunk_paths) - len(failed_chunks)) / len(chunk_paths) * 100
+    logger.info(f"Транскрипция завершена: {len(transcriptions)} из {len(chunk_paths)} частей успешно ({success_rate:.1f}%)")
+    
+    if failed_chunks:
+        logger.warning(f"Неудачные части: {failed_chunks}")
+        # Добавляем примечание о неполной транскрипции
+        combined_text += f"\n\n[ПРИМЕЧАНИЕ: Части {', '.join(map(str, failed_chunks))} не удалось обработать]"
+    
+    logger.info("=== ТРАНСКРИПЦИЯ БОЛЬШОГО АУДИО ЗАВЕРШЕНА ===")
+    return combined_text
 
 
 # --- КЛАССЫ ДЛЯ ОПТИМИЗАЦИИ ОЗВУЧКИ ---
@@ -1907,8 +2045,27 @@ async def process_audio_to_text(bot: Bot, audio_obj, chat_id: int, message_id: i
         audio.export(wav_path, format="wav")
         files_to_clean.append(wav_path)
         
-        # Распознаем речь с улучшенной функцией
-        recognized_text = await transcribe_audio_groq_with_retry(wav_path)
+        # Проверяем длительность для показа прогресса
+        audio_duration = AudioSegment.from_file(wav_path).duration_seconds
+        progress_msg = None
+        
+        if audio_duration > MAX_CHUNK_DURATION:
+            # Для длинных файлов показываем прогресс
+            progress_msg = await bot.send_message(
+                chat_id, 
+                f"🔄 Обрабатываю длинный аудиофайл ({audio_duration/60:.1f} мин)...\n"
+                f"📊 Разбиваю на части для обработки..."
+            )
+        
+        # Распознаем речь с поддержкой больших файлов
+        recognized_text = await transcribe_large_audio_with_chunks(wav_path)
+        
+        # Удаляем сообщение о прогрессе
+        if progress_msg:
+            try:
+                await bot.delete_message(chat_id, progress_msg.message_id)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить сообщение о прогрессе: {e}")
         
         if not recognized_text.strip():
             await bot.send_message(chat_id, f"❌ Не удалось распознать речь в {audio_type}.")
@@ -1953,11 +2110,15 @@ async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_si
     if file_size > SIZE_LIMIT:
         logger.info(f"Файл большой ({file_size} байт > {SIZE_LIMIT}), отправляю как TXT файл")
         
+        # Проверяем, был ли файл разбит на части
+        was_chunked = "[Часть " in text or "[ПРИМЕЧАНИЕ:" in text
+        processing_note = "\n**Метод обработки:** Файл был разбит на части для лучшего качества распознавания" if was_chunked else ""
+        
         # Создаем markdown контент
         markdown_content = f"""# Транскрипция аудиозаписи
 
 **Размер исходного файла:** {file_size / 1024 / 1024:.2f} МБ  
-**Дата обработки:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+**Дата обработки:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}{processing_note}
 
 ---
 
