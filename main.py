@@ -2044,32 +2044,41 @@ async def process_audio_to_text(bot: Bot, audio_obj, chat_id: int, message_id: i
         audio.export(wav_path, format="wav")
         files_to_clean.append(wav_path)
         
-        # Проверяем длительность для показа прогресса
+        # Проверяем длительность для обновления сообщения о прогрессе
         audio_duration = AudioSegment.from_file(wav_path).duration_seconds
-        progress_msg = None
         
+        # Если файл длинный, обновляем сообщение с деталями
         if audio_duration > MAX_CHUNK_DURATION:
-            # Для длинных файлов показываем прогресс
-            progress_msg = await bot.send_message(
-                chat_id, 
-                f"🔄 Обрабатываю длинный аудиофайл ({audio_duration/60:.1f} мин)...\n"
-                f"📊 Разбиваю на части для обработки..."
-            )
+            try:
+                await bot.edit_message_text(
+                    f"🔄 Обрабатываю длинный аудиофайл ({audio_duration/60:.1f} мин)...\n"
+                    f"📊 Разбиваю на части для обработки...",
+                    chat_id=chat_id,
+                    message_id=message_id
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось обновить сообщение о прогрессе: {e}")
         
         # Распознаем речь с поддержкой больших файлов
         recognized_text = await transcribe_large_audio_with_chunks(wav_path)
         
-        # Удаляем сообщение о прогрессе
-        if progress_msg:
-            try:
-                await bot.delete_message(chat_id, progress_msg.message_id)
-            except Exception as e:
-                logger.warning(f"Не удалось удалить сообщение о прогрессе: {e}")
-        
         if not recognized_text.strip():
-            await bot.send_message(chat_id, f"❌ Не удалось распознать речь в {audio_type}.")
+            try:
+                await bot.edit_message_text(
+                    f"❌ Не удалось распознать речь в {audio_type}.",
+                    chat_id=chat_id,
+                    message_id=message_id
+                )
+            except Exception:
+                await bot.send_message(chat_id, f"❌ Не удалось распознать речь в {audio_type}.")
             return
         
+        # Удаляем сообщение о процессе
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение о процессе: {e}")
+            
         # Проверяем размер транскрипции и отправляем соответствующим образом  
         # Передаем информацию о том, был ли файл длинным (больше 10 минут)
         was_long_file = audio_duration > MAX_CHUNK_DURATION
@@ -2082,9 +2091,19 @@ async def process_audio_to_text(bot: Bot, audio_obj, chat_id: int, message_id: i
         error_text = html.escape(str(e)[:250])
         error_message = f"❌ Произошла критическая ошибка: <code>{error_text}</code>"
         try:
-            await bot.send_message(chat_id, error_message, parse_mode="HTML")
-        except TelegramBadRequest:
-            await bot.send_message(chat_id, "❌ Произошла критическая ошибка.")
+            # Пытаемся обновить сообщение о процессе с ошибкой
+            await bot.edit_message_text(
+                error_message,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode="HTML"
+            )
+        except Exception:
+            # Если не удалось обновить, отправляем новое
+            try:
+                await bot.send_message(chat_id, error_message, parse_mode="HTML")
+            except TelegramBadRequest:
+                await bot.send_message(chat_id, "❌ Произошла критическая ошибка.")
         logger.error(f"=== PROCESS_AUDIO_TO_TEXT ({audio_type.upper()}) ЗАВЕРШЕН С ОШИБКОЙ ===")
     finally:
         logger.info(f"Начинаю очистку {len(files_to_clean)} временных файлов...")
@@ -2993,11 +3012,6 @@ async def main():
         
         sent_msg = await message.reply("🔄 Обрабатываю голосовое сообщение...")
         await process_audio_to_text(bot, message.voice, message.chat.id, sent_msg.message_id, user_id, 'voice')
-        # Удаляем сообщение о обработке
-        try:
-            await bot.delete_message(message.chat.id, sent_msg.message_id)
-        except Exception as e:
-            logger.warning(f"Не удалось удалить сообщение о обработке: {e}")
 
     @dp.message(F.audio)
     async def handle_audio(message: types.Message):
@@ -3015,11 +3029,6 @@ async def main():
         
         sent_msg = await message.reply("🔄 Обрабатываю аудио файл...")
         await process_audio_to_text(bot, message.audio, message.chat.id, sent_msg.message_id, user_id, 'audio')
-        # Удаляем сообщение о обработке
-        try:
-            await bot.delete_message(message.chat.id, sent_msg.message_id)
-        except Exception as e:
-            logger.warning(f"Не удалось удалить сообщение о обработке: {e}")
 
     @dp.message(F.video_note)
     async def handle_video_note(message: types.Message):
@@ -3037,11 +3046,6 @@ async def main():
         
         sent_msg = await message.reply("🔄 Обрабатываю видео сообщение...")
         await process_audio_to_text(bot, message.video_note, message.chat.id, sent_msg.message_id, user_id, 'video_note')
-        # Удаляем сообщение о обработке
-        try:
-            await bot.delete_message(message.chat.id, sent_msg.message_id)
-        except Exception as e:
-            logger.warning(f"Не удалось удалить сообщение о обработке: {e}")
 
     @dp.message(F.document)
     async def handle_document(message: types.Message):
@@ -3076,11 +3080,6 @@ async def main():
         
         sent_msg = await message.reply("🔄 Обрабатываю аудио документ...")
         await process_audio_to_text(bot, message.document, message.chat.id, sent_msg.message_id, user_id, 'document')
-        # Удаляем сообщение о обработке
-        try:
-            await bot.delete_message(message.chat.id, sent_msg.message_id)
-        except Exception as e:
-            logger.warning(f"Не удалось удалить сообщение о обработке: {e}")
 
     @dp.message(F.photo)
     async def handle_photo(message: types.Message):
