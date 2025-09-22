@@ -2094,6 +2094,104 @@ async def process_audio_to_text(bot: Bot, audio_obj, chat_id: int, message_id: i
             cleanup_gpu_memory()
 
 
+def format_transcription_text(text: str) -> str:
+    """
+    Форматирует текст транскрипции для лучшей читаемости в markdown
+    
+    Args:
+        text: Исходный текст транскрипции
+        
+    Returns:
+        str: Отформатированный текст в markdown
+    """
+    if not text or not text.strip():
+        return "*Текст не распознан*"
+    
+    # Разбиваем текст на части если есть метки частей
+    if "[Часть " in text:
+        parts = []
+        current_part = ""
+        
+        lines = text.split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Если это начало новой части
+            if line.startswith('[Часть '):
+                if current_part:
+                    parts.append(current_part.strip())
+                current_part = f"### {line}\n\n"
+            else:
+                current_part += line + " "
+        
+        # Добавляем последнюю часть
+        if current_part:
+            parts.append(current_part.strip())
+        
+        # Форматируем каждую часть
+        formatted_parts = []
+        for i, part in enumerate(parts, 1):
+            if part.startswith('### [Часть'):
+                formatted_parts.append(format_text_paragraphs(part))
+            else:
+                formatted_parts.append(f"### Часть {i}\n\n{format_text_paragraphs(part)}")
+        
+        result = "\n\n".join(formatted_parts)
+        
+        # Добавляем примечания если есть
+        if "[ПРИМЕЧАНИЕ:" in text:
+            note_start = text.find("[ПРИМЕЧАНИЕ:")
+            note_text = text[note_start:]
+            result += f"\n\n---\n\n> ⚠️ **Примечание:** {note_text.replace('[ПРИМЕЧАНИЕ:', '').replace(']', '')}"
+        
+        return result
+    else:
+        # Обычный текст без частей
+        return format_text_paragraphs(text)
+
+
+def format_text_paragraphs(text: str) -> str:
+    """
+    Разбивает текст на абзацы для лучшей читаемости
+    
+    Args:
+        text: Исходный текст
+        
+    Returns:
+        str: Текст, разбитый на абзацы
+    """
+    # Убираем лишние пробелы и переносы
+    clean_text = ' '.join(text.split())
+    
+    # Разбиваем по предложениям (точка + пробел + заглавная буква)
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+(?=[А-ЯA-Z])', clean_text)
+    
+    paragraphs = []
+    current_paragraph = []
+    
+    for sentence in sentences:
+        current_paragraph.append(sentence.strip())
+        
+        # Создаем новый абзац каждые 2-3 предложения или при длине больше 200 символов
+        paragraph_text = ' '.join(current_paragraph)
+        if len(current_paragraph) >= 3 or len(paragraph_text) > 200:
+            if paragraph_text.strip():
+                paragraphs.append(paragraph_text.strip())
+            current_paragraph = []
+    
+    # Добавляем оставшиеся предложения
+    if current_paragraph:
+        paragraph_text = ' '.join(current_paragraph).strip()
+        if paragraph_text:
+            paragraphs.append(paragraph_text)
+    
+    # Соединяем абзацы через двойной перенос строки для markdown
+    return '\n\n'.join(paragraphs) if paragraphs else clean_text
+
+
 async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_size: int):
     """
     Отправляет транскрипцию как текст или файл в зависимости от размера
@@ -2114,21 +2212,26 @@ async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_si
         was_chunked = "[Часть " in text or "[ПРИМЕЧАНИЕ:" in text
         processing_note = "\n**Метод обработки:** Файл был разбит на части для лучшего качества распознавания" if was_chunked else ""
         
+        # Форматируем текст для лучшей читаемости
+        formatted_text = format_transcription_text(text)
+        
         # Создаем markdown контент
-        markdown_content = f"""# Транскрипция аудиозаписи
+        markdown_content = f"""# 🎤 Транскрипция аудиозаписи
+
+## 📊 Информация о файле
 
 **Размер исходного файла:** {file_size / 1024 / 1024:.2f} МБ  
 **Дата обработки:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}{processing_note}
 
 ---
 
-## Распознанный текст:
+## 📝 Распознанный текст
 
-{text}
+{formatted_text}
 
 ---
 
-*Создано ботом papaVoiceTG*
+*Создано ботом vokVoiceTG*
 """
         
         # Создаем файл в памяти
@@ -2143,10 +2246,21 @@ async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_si
         )
     else:
         logger.info(f"Файл небольшой ({file_size} байт), отправляю как обычное сообщение")
+        
+        # Для коротких текстов форматируем без разбиения на части
+        if len(text) > 500:
+            # Длинный текст - разбиваем на абзацы
+            formatted_text = format_text_paragraphs(text)
+            message_text = f"📝 **Распознанный текст:**\n\n{formatted_text}"
+        else:
+            # Короткий текст - оставляем как есть
+            message_text = f"📝 **Распознанный текст:**\n\n{text}"
+        
         # Отправляем как обычное текстовое сообщение
         await bot.send_message(
             chat_id,
-            f"📝 Распознанный текст:\n{text}"
+            message_text,
+            parse_mode="Markdown"
         )
 
 
