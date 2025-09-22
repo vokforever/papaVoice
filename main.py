@@ -7,6 +7,7 @@ import asyncio
 import io
 import re  # Добавляем недостающий импорт
 import json  # Добавляем импорт для работы с JSON
+import random  # Добавляем для экспоненциальной задержки
 import html
 import base64  # Добавляем для кодирования изображений
 from pathlib import Path
@@ -82,6 +83,136 @@ else:
     # Отключаем GPU, если не используем локальные зависимости
     USE_NVIDIA_GPU = False
     logger.info("Running in API-only mode. Skipping torch and numpy imports.")
+
+
+# --- КЛАСС ДЛЯ УПРАВЛЕНИЯ RATE LIMITING GROQ API ---
+
+def extract_wait_time_from_error(error_message: str) -> Optional[float]:
+    """
+    Извлекает рекомендуемое время ожидания из сообщения об ошибке Groq API
+    
+    Args:
+        error_message: Сообщение об ошибке от Groq API
+        
+    Returns:
+        float: Время ожидания в секундах или None, если не удалось извлечь
+    """
+    try:
+        # Ищем паттерн вида "Please try again in 1m0.837999999s"
+        match = re.search(r'Please try again in (\d+)m(\d+\.?\d*)s', error_message)
+        if match:
+            minutes = int(match.group(1))
+            seconds = float(match.group(2))
+            wait_time = minutes * 60 + seconds
+            logger.info(f"Извлечено время ожидания из ошибки: {wait_time:.2f} секунд")
+            return wait_time
+            
+        # Ищем паттерн вида "Please try again in 30.5s"
+        match = re.search(r'Please try again in (\d+\.?\d*)s', error_message)
+        if match:
+            wait_time = float(match.group(1))
+            logger.info(f"Извлечено время ожидания из ошибки: {wait_time:.2f} секунд")
+            return wait_time
+            
+    except Exception as e:
+        logger.warning(f"Не удалось извлечь время ожидания из ошибки: {e}")
+        
+    return None
+
+
+class GroqRateLimitHandler:
+    """
+    Класс для управления лимитами скорости Groq API и отслеживания использования
+    """
+    
+    def __init__(self, hourly_limit: int = 7200):
+        """
+        Инициализация обработчика лимитов
+        
+        Args:
+            hourly_limit: Лимит секунд аудио в час (по умолчанию 7200)
+        """
+        self.hourly_limit = hourly_limit
+        self.used_this_hour = 0
+        self.reset_time = time.time() + 3600  # Сброс через час
+        self.last_request_time = 0
+        self.min_delay_between_requests = 2.0  # Минимальная задержка между запросами в секундах
+        
+    def reset_if_needed(self):
+        """Сбрасывает счетчик использования, если прошел час"""
+        current_time = time.time()
+        if current_time >= self.reset_time:
+            old_used = self.used_this_hour
+            self.used_this_hour = 0
+            self.reset_time = current_time + 3600
+            logger.info(f"Сброс лимитов API. Использовано в прошлом часе: {old_used} секунд")
+            
+    def check_and_wait_for_limit(self, requested_seconds: float):
+        """
+        Проверяет лимиты и ждет при необходимости
+        
+        Args:
+            requested_seconds: Количество секунд аудио для обработки
+        """
+        self.reset_if_needed()
+        current_time = time.time()
+        
+        # Проверяем минимальную задержку между запросами
+        time_since_last_request = current_time - self.last_request_time
+        if time_since_last_request < self.min_delay_between_requests:
+            delay = self.min_delay_between_requests - time_since_last_request
+            logger.info(f"Ожидание {delay:.2f} секунд для соблюдения минимальной задержки")
+            time.sleep(delay)
+            
+        # Проверяем, не превышаем ли часовой лимит
+        if self.used_this_hour + requested_seconds > self.hourly_limit:
+            wait_time = self.reset_time - time.time()
+            if wait_time > 0:
+                logger.warning(
+                    f"Приближение к лимиту API: использовано {self.used_this_hour}/{self.hourly_limit} секунд. "
+                    f"Ожидание {wait_time:.2f} секунд до сброса лимита"
+                )
+                time.sleep(wait_time)
+                self.reset_if_needed()
+                
+        self.last_request_time = time.time()
+        
+    def add_usage(self, seconds_used: float):
+        """
+        Добавляет использованные секунды к счетчику
+        
+        Args:
+            seconds_used: Количество секунд аудио, которые были обработаны
+        """
+        self.reset_if_needed()
+        self.used_this_hour += seconds_used
+        logger.info(f"Добавлено {seconds_used:.2f} секунд к использованию API. "
+                   f"Всего использовано в этом часе: {self.used_this_hour}/{self.hourly_limit}")
+        
+    def get_exponential_backoff_delay(self, attempt: int, base_delay: float = 1.0) -> float:
+        """
+        Рассчитывает экспоненциальную задержку с джиттером
+        
+        Args:
+            attempt: Номер попытки (начиная с 0)
+            base_delay: Базовая задержка в секундах
+            
+        Returns:
+            float: Время задержки в секундах
+        """
+        # Экспоненциальная задержка: base_delay * (2^attempt) с джиттером
+        delay = base_delay * (2 ** attempt)
+        # Добавляем случайный джиттер (0-50% от задержки)
+        jitter = random.uniform(0, delay * 0.5)
+        total_delay = delay + jitter
+        
+        # Ограничиваем максимальную задержку 5 минутами
+        return min(total_delay, 300.0)
+
+
+# Глобальный экземпляр обработчика лимитов
+groq_rate_limiter = GroqRateLimitHandler()
+
 
 async def run_blocking(func, *args, **kwargs):
     logger.debug(f"Выполняю блокирующую функцию: {func.__name__}")
@@ -1263,7 +1394,17 @@ async def split_large_audio(audio_path: Path, max_duration: int = MAX_CHUNK_DURA
     logger.info(f"=== РАЗБИЕНИЕ ЗАВЕРШЕНО: {len(chunks_paths)} частей ===")
     return chunks_paths
 
-async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 2) -> str:
+async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 3) -> str:
+    """
+    Транскрибирует аудио с улучшенной обработкой rate limiting и экспоненциальной задержкой
+    
+    Args:
+        audio_path: Путь к аудиофайлу
+        max_retries: Максимальное количество повторных попыток
+        
+    Returns:
+        str: Транскрибированный текст
+    """
     logger.info("=== НАЧАЛО TRANSCRIBE_AUDIO_GROQ_WITH_RETRY ===")
     
     if not groq_client:
@@ -1271,6 +1412,9 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
     
     audio_duration = AudioSegment.from_file(audio_path).duration_seconds
     logger.info(f"Длительность аудио: {audio_duration:.2f} секунд")
+    
+    # Проверяем лимиты перед началом обработки
+    groq_rate_limiter.check_and_wait_for_limit(audio_duration)
     
     for attempt in range(max_retries + 1):
         try:
@@ -1314,6 +1458,9 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
                         prompt="Запиши всё, что слышишь, без сокращений.",
                         timestamp_granularities=["word", "segment"]
                     )
+                
+                # Если запрос успешен, добавляем использование к счетчику
+                groq_rate_limiter.add_usage(audio_duration)
                 
                 if hasattr(transcription, "text"):
                     # Получаем текст из поля text
@@ -1367,8 +1514,43 @@ async def transcribe_audio_groq_with_retry(audio_path: Path, max_retries: int = 
                     return transcription.text if hasattr(transcription, "text") else str(transcription)
                 
         except Exception as e:
-            logger.error(f"Ошибка в попытке {attempt + 1}: {e}")
+            error_str = str(e)
+            logger.error(f"Ошибка в попытке {attempt + 1}: {error_str}")
+            
+            # Специальная обработка ошибок rate limiting
+            if "rate_limit_exceeded" in error_str or "429" in error_str:
+                logger.warning("Обнаружена ошибка rate limiting")
+                
+                # Извлекаем время ожидания из ошибки Groq API
+                recommended_wait_time = extract_wait_time_from_error(error_str)
+                
+                if recommended_wait_time:
+                    # Используем рекомендуемое время ожидания
+                    wait_time = recommended_wait_time + random.uniform(1, 5)  # Добавляем небольшой джиттер
+                    logger.info(f"Ожидание {wait_time:.2f} секунд по рекомендации API")
+                    await asyncio.sleep(wait_time)
+                else:
+                    # Используем экспоненциальную задержку, если не удалось извлечь время
+                    wait_time = groq_rate_limiter.get_exponential_backoff_delay(attempt)
+                    logger.info(f"Экспоненциальная задержка: {wait_time:.2f} секунд")
+                    await asyncio.sleep(wait_time)
+                    
+            elif "APIError" in error_str or "HTTP" in error_str:
+                # Другие API ошибки - используем более короткую экспоненциальную задержку
+                if attempt < max_retries:
+                    wait_time = groq_rate_limiter.get_exponential_backoff_delay(attempt, base_delay=0.5)
+                    logger.info(f"API ошибка, ожидание {wait_time:.2f} секунд")
+                    await asyncio.sleep(wait_time)
+            else:
+                # Для других типов ошибок - короткая задержка
+                if attempt < max_retries:
+                    wait_time = 2.0 + random.uniform(0, 2)
+                    logger.info(f"Общая ошибка, ожидание {wait_time:.2f} секунд")
+                    await asyncio.sleep(wait_time)
+            
+            # Если это последняя попытка, выбрасываем исключение
             if attempt == max_retries:
+                logger.error("Все попытки исчерпаны")
                 raise
     
     logger.info("=== TRANSCRIBE_AUDIO_GROQ_WITH_RETRY ЗАВЕРШЕН УСПЕШНО ===")
@@ -1409,6 +1591,30 @@ async def transcribe_large_audio_with_chunks(audio_path: Path) -> str:
         for i, chunk_path in enumerate(chunk_paths, 1):
             logger.info(f"Транскрибирую часть {i}/{len(chunk_paths)}: {chunk_path.name}")
             
+            # Добавляем адаптивную задержку между чанками
+            if i > 1:  # Не ждем перед первым чанком
+                # Рассчитываем адаптивную задержку на основе статуса лимитов
+                usage_percentage = groq_rate_limiter.used_this_hour / groq_rate_limiter.hourly_limit
+                
+                if usage_percentage > 0.9:
+                    # Если использовано более 90% лимита - большая задержка
+                    adaptive_delay = 30 + random.uniform(0, 15)
+                    logger.info(f"Высокая нагрузка API ({usage_percentage*100:.1f}%), адаптивная задержка: {adaptive_delay:.2f} секунд")
+                elif usage_percentage > 0.7:
+                    # Если использовано более 70% лимита - средняя задержка
+                    adaptive_delay = 15 + random.uniform(0, 10)
+                    logger.info(f"Средняя нагрузка API ({usage_percentage*100:.1f}%), адаптивная задержка: {adaptive_delay:.2f} секунд")
+                elif usage_percentage > 0.5:
+                    # Если использовано более 50% лимита - небольшая задержка
+                    adaptive_delay = 8 + random.uniform(0, 5)
+                    logger.info(f"Умеренная нагрузка API ({usage_percentage*100:.1f}%), адаптивная задержка: {adaptive_delay:.2f} секунд")
+                else:
+                    # Низкая нагрузка - минимальная задержка
+                    adaptive_delay = 3 + random.uniform(0, 2)
+                    logger.debug(f"Низкая нагрузка API ({usage_percentage*100:.1f}%), минимальная задержка: {adaptive_delay:.2f} секунд")
+                
+                await asyncio.sleep(adaptive_delay)
+            
             try:
                 chunk_transcription = await transcribe_audio_groq_with_retry(chunk_path)
                 
@@ -1423,6 +1629,12 @@ async def transcribe_large_audio_with_chunks(audio_path: Path) -> str:
             except Exception as e:
                 logger.error(f"Ошибка транскрипции части {i}: {e}")
                 failed_chunks.append(i)
+                
+                # При ошибке добавляем дополнительную задержку перед следующей частью
+                if i < len(chunk_paths):
+                    error_delay = 10 + random.uniform(0, 5)
+                    logger.info(f"Дополнительная задержка после ошибки: {error_delay:.2f} секунд")
+                    await asyncio.sleep(error_delay)
                 
     finally:
         # Очищаем временные части
@@ -2613,7 +2825,7 @@ async def main():
 
     @dp.message(Command("groq_status"))
     async def handle_groq_status(message: types.Message):
-        """Команда для проверки статуса Groq API"""
+        """Команда для проверки статуса Groq API с информацией о rate limiting"""
         try:
             if not GROQ_API_KEY:
                 await message.reply("❌ GROQ_API_KEY не настроен")
@@ -2621,6 +2833,21 @@ async def main():
             
             # Проверяем доступность API
             is_available = check_groq_availability()
+            
+            # Получаем информацию о rate limiting
+            groq_rate_limiter.reset_if_needed()  # Обновляем статус лимитов
+            usage_percentage = (groq_rate_limiter.used_this_hour / groq_rate_limiter.hourly_limit) * 100
+            remaining_time = (groq_rate_limiter.reset_time - time.time()) / 60  # в минутах
+            
+            # Определяем статус использования
+            if usage_percentage > 90:
+                usage_status = "🔴 Критическое"
+            elif usage_percentage > 70:
+                usage_status = "🟡 Высокое"
+            elif usage_percentage > 50:
+                usage_status = "🟠 Умеренное"
+            else:
+                usage_status = "🟢 Низкое"
             
             if is_available:
                 # Пробуем получить список моделей для дополнительной информации
@@ -2630,30 +2857,44 @@ async def main():
                     
                     if models_response and hasattr(models_response, 'data'):
                         models_count = len(models_response.data)
-                        status_text = (
-                            f"🤖 **Статус Groq API:**\n\n"
-                            f"✅ **Доступен**\n"
-                            f"📊 **Доступно моделей:** {models_count}\n"
-                            f"🔑 **API ключ:** Настроен"
-                        )
+                        models_info = f"📊 **Доступно моделей:** {models_count}\n"
                     else:
-                        status_text = (
-                            f"🤖 **Статус Groq API:**\n\n"
-                            f"✅ **Доступен**\n"
-                            f"🔑 **API ключ:** Настроен"
-                        )
-                except Exception as e:
-                    status_text = (
-                        f"🤖 **Статус Groq API:**\n\n"
-                        f"✅ **Доступен**\n"
-                        f"🔑 **API ключ:** Настроен\n"
-                        f"⚠️ **Примечание:** Не удалось получить список моделей: {str(e)}"
-                    )
+                        models_info = ""
+                except Exception:
+                    models_info = "⚠️ **Примечание:** Не удалось получить список моделей\n"
+                
+                status_text = (
+                    f"🤖 **Статус Groq API:**\n\n"
+                    f"✅ **Соединение:** Доступен\n"
+                    f"🔑 **API ключ:** Настроен\n"
+                    f"{models_info}\n"
+                    f"📈 **Rate Limiting:**\n"
+                    f"• **Использование:** {groq_rate_limiter.used_this_hour:.0f}/{groq_rate_limiter.hourly_limit} сек ({usage_percentage:.1f}%)\n"
+                    f"• **Статус:** {usage_status}\n"
+                    f"• **Сброс через:** {remaining_time:.1f} мин\n"
+                    f"• **Мин. задержка:** {groq_rate_limiter.min_delay_between_requests:.1f} сек\n\n"
+                    f"💡 **Рекомендации:**\n"
+                )
+                
+                # Добавляем рекомендации на основе использования
+                if usage_percentage > 90:
+                    status_text += "• Критический уровень! Рекомендуется подождать\n• Большие задержки между запросами"
+                elif usage_percentage > 70:
+                    status_text += "• Высокое использование, возможны задержки\n• Рекомендуется умерить активность"
+                elif usage_percentage > 50:
+                    status_text += "• Умеренное использование\n• Система автоматически управляет задержками"
+                else:
+                    status_text += "• Низкое использование\n• Оптимальные условия для работы"
+                    
             else:
                 status_text = (
                     f"🤖 **Статус Groq API:**\n\n"
-                    f"❌ **Недоступен**\n"
-                    f"🔑 **API ключ:** {'Настроен' if GROQ_API_KEY else 'Не настроен'}\n"
+                    f"❌ **Соединение:** Недоступен\n"
+                    f"🔑 **API ключ:** {'Настроен' if GROQ_API_KEY else 'Не настроен'}\n\n"
+                    f"📈 **Rate Limiting (локальный счетчик):**\n"
+                    f"• **Использование:** {groq_rate_limiter.used_this_hour:.0f}/{groq_rate_limiter.hourly_limit} сек ({usage_percentage:.1f}%)\n"
+                    f"• **Статус:** {usage_status}\n"
+                    f"• **Сброс через:** {remaining_time:.1f} мин\n\n"
                     f"💡 **Проверьте:** Настройки API ключа и доступность сервиса"
                 )
             
