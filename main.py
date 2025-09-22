@@ -1413,9 +1413,8 @@ async def transcribe_large_audio_with_chunks(audio_path: Path) -> str:
                 chunk_transcription = await transcribe_audio_groq_with_retry(chunk_path)
                 
                 if chunk_transcription.strip():
-                    # Добавляем метку времени для лучшего понимания последовательности
-                    time_marker = f"[Часть {i}]" if len(chunk_paths) > 1 else ""
-                    transcriptions.append(f"{time_marker} {chunk_transcription.strip()}")
+                    # Добавляем транскрипцию без меток частей
+                    transcriptions.append(chunk_transcription.strip())
                     logger.info(f"Часть {i} транскрибирована успешно ({len(chunk_transcription)} символов)")
                 else:
                     logger.warning(f"Часть {i} вернула пустую транскрипцию")
@@ -1439,7 +1438,7 @@ async def transcribe_large_audio_with_chunks(audio_path: Path) -> str:
     if not transcriptions:
         raise Exception("Не удалось транскрибировать ни одну часть аудиофайла")
     
-    # Объединяем транскрипции
+    # Объединяем транскрипции с разделителем для лучшей читаемости
     combined_text = " ".join(transcriptions)
     
     # Информация о процессе
@@ -2071,8 +2070,10 @@ async def process_audio_to_text(bot: Bot, audio_obj, chat_id: int, message_id: i
             await bot.send_message(chat_id, f"❌ Не удалось распознать речь в {audio_type}.")
             return
         
-        # Проверяем размер транскрипции и отправляем соответствующим образом
-        await send_transcription_response(bot, chat_id, recognized_text, file_size)
+        # Проверяем размер транскрипции и отправляем соответствующим образом  
+        # Передаем информацию о том, был ли файл длинным (больше 10 минут)
+        was_long_file = audio_duration > MAX_CHUNK_DURATION
+        await send_transcription_response(bot, chat_id, recognized_text, file_size, was_long_file)
         
         logger.info(f"=== PROCESS_AUDIO_TO_TEXT ({audio_type.upper()}) ЗАВЕРШЕН УСПЕШНО ===")
 
@@ -2107,49 +2108,23 @@ def format_transcription_text(text: str) -> str:
     if not text or not text.strip():
         return "*Текст не распознан*"
     
-    # Разбиваем текст на части если есть метки частей
-    if "[Часть " in text:
-        parts = []
-        current_part = ""
-        
-        lines = text.split('\n')
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Если это начало новой части
-            if line.startswith('[Часть '):
-                if current_part:
-                    parts.append(current_part.strip())
-                current_part = f"### {line}\n\n"
-            else:
-                current_part += line + " "
-        
-        # Добавляем последнюю часть
-        if current_part:
-            parts.append(current_part.strip())
-        
-        # Форматируем каждую часть
-        formatted_parts = []
-        for i, part in enumerate(parts, 1):
-            if part.startswith('### [Часть'):
-                formatted_parts.append(format_text_paragraphs(part))
-            else:
-                formatted_parts.append(f"### Часть {i}\n\n{format_text_paragraphs(part)}")
-        
-        result = "\n\n".join(formatted_parts)
-        
-        # Добавляем примечания если есть
-        if "[ПРИМЕЧАНИЕ:" in text:
-            note_start = text.find("[ПРИМЕЧАНИЕ:")
-            note_text = text[note_start:]
-            result += f"\n\n---\n\n> ⚠️ **Примечание:** {note_text.replace('[ПРИМЕЧАНИЕ:', '').replace(']', '')}"
-        
-        return result
-    else:
-        # Обычный текст без частей
-        return format_text_paragraphs(text)
+    # Проверяем наличие примечаний об ошибках обработки
+    note_text = ""
+    if "[ПРИМЕЧАНИЕ:" in text:
+        note_start = text.find("[ПРИМЕЧАНИЕ:")
+        note_text = text[note_start:]
+        # Убираем примечание из основного текста
+        text = text[:note_start].strip()
+    
+    # Форматируем основной текст
+    formatted_text = format_text_paragraphs(text)
+    
+    # Добавляем примечание если есть
+    if note_text:
+        clean_note = note_text.replace('[ПРИМЕЧАНИЕ:', '').replace(']', '').strip()
+        formatted_text += f"\n\n---\n\n> ⚠️ **Примечание:** {clean_note}"
+    
+    return formatted_text
 
 
 def format_text_paragraphs(text: str) -> str:
@@ -2192,7 +2167,7 @@ def format_text_paragraphs(text: str) -> str:
     return '\n\n'.join(paragraphs) if paragraphs else clean_text
 
 
-async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_size: int):
+async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_size: int, was_chunked: bool = False):
     """
     Отправляет транскрипцию как текст или файл в зависимости от размера
     
@@ -2208,8 +2183,7 @@ async def send_transcription_response(bot: Bot, chat_id: int, text: str, file_si
     if file_size > SIZE_LIMIT:
         logger.info(f"Файл большой ({file_size} байт > {SIZE_LIMIT}), отправляю как TXT файл")
         
-        # Проверяем, был ли файл разбит на части
-        was_chunked = "[Часть " in text or "[ПРИМЕЧАНИЕ:" in text
+        # Добавляем информацию о методе обработки
         processing_note = "\n**Метод обработки:** Файл был разбит на части для лучшего качества распознавания" if was_chunked else ""
         
         # Форматируем текст для лучшей читаемости
